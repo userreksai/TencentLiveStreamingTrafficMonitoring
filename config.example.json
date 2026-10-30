@@ -9,7 +9,9 @@
   },
   "reports": {
     "timezone": "UTC+08:00",
-    "interval_minutes": 60
+    "interval_minutes": 60,
+    "delay_minutes": 5,
+    "revision_updates": false
   },
   "alerts": {
     "remaining_percent": [50, 10],

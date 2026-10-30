@@ -107,6 +107,10 @@ def validate_config(raw, path=None):
     reports["interval_minutes"] = integer(reports.get("interval_minutes", 60), "reports.interval_minutes", 5, 1440)
     if reports["interval_minutes"] % 5 or 1440 % reports["interval_minutes"]:
         raise ConfigError("汇总周期必须是五分钟的整数倍，且能整除 1440 分钟")
+    reports["delay_minutes"] = integer(reports.get("delay_minutes", 5), "reports.delay_minutes", 0, 1440)
+    reports.setdefault("revision_updates", False)
+    if type(reports["revision_updates"]) is not bool:
+        raise ConfigError("reports.revision_updates 必须为 true 或 false")
     alerts = cfg["alerts"]
     levels = alerts.get("remaining_percent", [50, 10])
     if not isinstance(levels, list) or not levels:

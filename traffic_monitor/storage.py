@@ -44,8 +44,11 @@ class StateStore:
                     raise ValueError()
                 for end, value in updates["windows"].items():
                     if (not isinstance(end, str) or not end.isdecimal() or not isinstance(value, dict)
-                            or not isinstance(value.get("signature"), str) or type(value.get("complete")) is not bool):
+                            or not isinstance(value.get("signature"), str) or type(value.get("complete")) is not bool
+                            or ("sent" in value and type(value["sent"]) is not bool)):
                         raise ValueError()
+                if "format_version" in updates and (type(updates["format_version"]) is not int or updates["format_version"] != 2):
+                    raise ValueError()
                 observation = updates.get("observation", [])
                 if not isinstance(observation, list) or any(
                         not isinstance(row, list) or len(row) != 3 or not isinstance(row[0], str)

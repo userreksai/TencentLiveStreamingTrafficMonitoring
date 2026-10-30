@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from test_app import ANCHOR, CaptureSender, FakeClient, buckets, raw_config
+from test_app import ANCHOR, CaptureSender, FakeClient, buckets, raw_config, today_snapshot
 from traffic_monitor.app import Monitor
 from traffic_monitor.__main__ import main
 from traffic_monitor.config import validate_config
@@ -50,6 +50,7 @@ class AutoPackageTests(unittest.TestCase):
         self.packages = patch("traffic_monitor.app.fetch_packages", side_effect=lambda _client: self.plans).start()
         self.usage = patch("traffic_monitor.app.fetch_billable_buckets", side_effect=lambda _client, start, end, _services, _regions:
                            buckets(start, end, self.amounts)).start()
+        patch("traffic_monitor.app.fetch_today_downstream", side_effect=today_snapshot).start()
         patch("traffic_monitor.tencent._open_request", side_effect=AssertionError("Real cloud requests are forbidden")).start()
         self.addCleanup(patch.stopall)
 
@@ -326,7 +327,7 @@ class AutoPackageTests(unittest.TestCase):
         normal = self.sender.route("normal")
         self.assertFalse(any("不足 10%" in message for message in normal))
         self.assertTrue(any("新购流量包已识别" in message for message in normal))
-        self.assertTrue(any("整点汇总" in message and "105.000 MB" in message for message in normal))
+        self.assertTrue(any("整点汇总" in message and "流量包估算剩余：0.000 TB（52.50%）" in message for message in normal))
         restored = StateStore(self.path)
         restored.load()
         record = restored.state["accounts"][self.account["_id"]]

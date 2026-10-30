@@ -205,6 +205,48 @@ def _iso(epoch):
     return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def fetch_today_downstream(client, now, offset=8 * 3600):
+    """Read the official cumulative playback total for the configured local day.
+
+    This unweighted counter covers all playback domains, regions, LVB and LEB.
+    It is for the daily overview display only, never a resource-package debit.
+    The API may include its EndTime point or a partially populated last bucket;
+    SumFlux is retained as returned rather than recomputed from bucket records.
+    """
+    if (isinstance(now, bool) or not isinstance(now, int) or now < 0
+            or isinstance(offset, bool) or not isinstance(offset, int) or abs(offset) > 14 * 3600):
+        raise TencentError("ConfigurationError", "Daily usage time and timezone offset are invalid")
+    start = ((now + offset) // 86400) * 86400 - offset
+    result = {"day_start": start, "checked_at": now, "through": now,
+              "bytes": "0", "latest_data_time": None}
+    if start == now:
+        # A new local day has no elapsed query range yet. Do not send an
+        # invalid StartTime == EndTime request, or reuse yesterday's total.
+        return result
+    response = client.call("DescribeBillBandwidthAndFluxList", {
+        "StartTime": _iso(start), "EndTime": _iso(now), "Granularity": 5,
+    })
+    amount = _bytes(response.get("SumFlux"))
+    items = response.get("DataInfoList")
+    if not isinstance(items, list):
+        raise TencentError("InvalidResponse", "Tencent daily usage response has no DataInfoList",
+                           response.get("RequestId", ""))
+    latest = None
+    for item in items:
+        if not isinstance(item, dict):
+            raise TencentError("InvalidResponse", "A Tencent daily usage record is not an object")
+        timestamp = _epoch(item.get("Time"))
+        if not start <= timestamp <= now:
+            raise TencentError("InvalidResponse", "Tencent daily usage contains records outside the requested day range")
+        _bytes(item.get("Flux"))
+        latest = max(latest or timestamp, timestamp)
+    if amount and latest is None:
+        raise TencentError("InvalidResponse", "Tencent daily total has no underlying usage records")
+    result["bytes"] = str(amount)
+    result["latest_data_time"] = min(latest + 300, now) if latest is not None else None
+    return result
+
+
 def fetch_billable_buckets(client, start, end, services, regions):
     """Collect explicit per-service/per-region five-minute usage in [start,end).
 

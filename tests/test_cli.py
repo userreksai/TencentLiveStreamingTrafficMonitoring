@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from traffic_monitor.__main__ import main
 from traffic_monitor.tencent import TencentError
-from test_app import ANCHOR, FakeClient, buckets, package, raw_config
+from test_app import ANCHOR, FakeClient, buckets, package, raw_config, today_snapshot
 
 
 class CliTests(unittest.TestCase):
@@ -25,6 +25,8 @@ class CliTests(unittest.TestCase):
         self.packages = patch("traffic_monitor.app.fetch_packages", return_value=[package()]).start()
         self.usage = patch("traffic_monitor.app.fetch_billable_buckets",
                            side_effect=lambda client, start, end, services, regions: buckets(start, end)).start()
+        self.today = patch("traffic_monitor.app.fetch_today_downstream",
+                           side_effect=today_snapshot, create=True).start()
         self.send = patch("traffic_monitor.notifications.LarkSender.send").start()
         patch("traffic_monitor.tencent._open_request", side_effect=AssertionError("Real cloud requests are forbidden")).start()
         self.addCleanup(patch.stopall)
@@ -33,6 +35,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, main(self.args + ["--check-config"]))
         self.packages.assert_not_called()
         self.usage.assert_not_called()
+        self.today.assert_not_called()
         self.send.assert_not_called()
         self.assertFalse(self.state.exists())
 
@@ -40,6 +43,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, main(self.args + ["--once"]))
         self.packages.assert_called_once()
         self.usage.assert_called_once()
+        self.today.assert_called_once()
         self.send.assert_not_called()
         self.assertTrue(self.state.exists())
 

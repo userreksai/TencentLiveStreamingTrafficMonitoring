@@ -59,9 +59,10 @@ def main(argv=None):
     try:
         config = load_config(args.config)
         if args.check_config:
-            LOG.info("配置校验通过：%s 个账号，采集周期 %s 秒，%s 每 %s 分钟按时钟边界汇总",
+            LOG.info("配置校验通过：%s 个账号，采集周期 %s 秒，%s 每 %s 分钟汇总，延后 %s 分钟，修订通知%s",
                      len(config["accounts"]), config["sampling"]["interval_seconds"],
-                     config["reports"]["timezone"], config["reports"]["interval_minutes"])
+                     config["reports"]["timezone"], config["reports"]["interval_minutes"],
+                     config["reports"]["delay_minutes"], "开启" if config["reports"]["revision_updates"] else "关闭")
             if any(a["_anchor"] is None for a in config["accounts"]):
                 LOG.warning("存在未校准账号：运行后可采集并上报异常，但不会声称剩余量正常")
             return 0

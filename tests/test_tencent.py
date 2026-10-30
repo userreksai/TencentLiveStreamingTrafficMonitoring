@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
 from traffic_monitor.tencent import (
-    REGIONS, TencentClient, TencentError, fetch_billable_buckets, fetch_packages,
+    REGIONS, TencentClient, TencentError, fetch_billable_buckets, fetch_packages, fetch_today_downstream,
 )
 
 
@@ -182,6 +182,87 @@ class UsageBucketTests(unittest.TestCase):
             with self.subTest(services=services, regions=regions):
                 with self.assertRaises(TencentError):
                     fetch_billable_buckets(self.client, self.start, self.end, services, regions)
+
+
+class TodayDownstreamTests(unittest.TestCase):
+    def setUp(self):
+        self.now = utc("2026-10-30T07:55:21Z")
+        self.client = Mock()
+        self.client.call.return_value = {
+            "SumFlux": Decimal("4470000.1234567"),
+            "DataInfoList": [{"Time": "2026-10-30 15:50:00", "Flux": "12.3456789"}],
+        }
+
+    def test_reads_official_sumflux_once_for_all_playback_scopes(self):
+        result = fetch_today_downstream(self.client, self.now)
+        self.client.call.assert_called_once_with("DescribeBillBandwidthAndFluxList", {
+            "StartTime": "2026-10-29T16:00:00Z", "EndTime": "2026-10-30T07:55:21Z", "Granularity": 5,
+        })
+        # SumFlux is an official aggregate, not a local sum of Flux rows or a
+        # region/service package conversion. Fractional bytes round upward.
+        self.assertEqual("4470000123457", result["bytes"])
+        self.assertEqual(utc("2026-10-29T16:00:00Z"), result["day_start"])
+        self.assertEqual(self.now, result["checked_at"])
+        self.assertEqual(self.now, result["through"])
+        self.assertEqual(utc("2026-10-30T07:55:00Z"), result["latest_data_time"])
+        for excluded in ("PlayDomains", "ServiceName", "RegionNames", "MainlandOrOversea"):
+            self.assertNotIn(excluded, self.client.call.call_args.args[1])
+
+    def test_day_boundary_uses_configured_timezone_instead_of_utc(self):
+        for offset, start in ((0, "2026-10-30T00:00:00Z"),
+                              (7 * 3600, "2026-10-29T17:00:00Z"),
+                              (-5 * 3600, "2026-10-30T05:00:00Z")):
+            with self.subTest(offset=offset):
+                result = fetch_today_downstream(self.client, self.now, offset)
+                self.assertEqual(utc(start), result["day_start"])
+                self.assertEqual(start, self.client.call.call_args.args[1]["StartTime"])
+
+    def test_midnight_returns_new_day_zero_without_querying_or_using_yesterday(self):
+        now = utc("2026-10-29T16:00:00Z")
+        result = fetch_today_downstream(self.client, now)
+        self.assertEqual({"day_start": now, "checked_at": now, "through": now,
+                          "bytes": "0", "latest_data_time": None}, result)
+        self.client.call.assert_not_called()
+
+    def test_inclusive_current_bucket_does_not_extrapolate_past_query_time(self):
+        self.client.call.return_value = {"SumFlux": 1, "DataInfoList": [
+            {"Time": "2026-10-30T07:55:00Z", "Flux": 1},
+        ]}
+        self.assertEqual(self.now, fetch_today_downstream(self.client, self.now)["latest_data_time"])
+        exact = utc("2026-10-30T07:55:00Z")
+        self.assertEqual(exact, fetch_today_downstream(self.client, exact)["latest_data_time"])
+
+    def test_explicit_zero_is_allowed_but_missing_or_invalid_total_is_not_zero(self):
+        for items in ([], [{"Time": "2026-10-30 15:50:00", "Flux": 0}]):
+            with self.subTest(items=items):
+                self.client.call.return_value = {"SumFlux": 0, "DataInfoList": items}
+                self.assertEqual("0", fetch_today_downstream(self.client, self.now)["bytes"])
+        for value in (None, -1, True, "NaN", "Infinity", "not-a-number"):
+            with self.subTest(value=value):
+                self.client.call.return_value = {"SumFlux": value, "DataInfoList": []}
+                with self.assertRaises(TencentError):
+                    fetch_today_downstream(self.client, self.now)
+        self.client.call.return_value = {"DataInfoList": []}
+        with self.assertRaises(TencentError):
+            fetch_today_downstream(self.client, self.now)
+
+    def test_missing_malformed_or_out_of_range_records_are_rejected(self):
+        for items in (None, {}, [None], [{}],
+                      [{"Time": "2026-10-29 23:55:00", "Flux": 1}],
+                      [{"Time": "2026-10-30 16:00:00", "Flux": 1}],
+                      [{"Time": "2026-10-30 15:50:00", "Flux": -1}],
+                      [{"Time": "2026-10-30 15:50:01", "Flux": 1}], []):
+            with self.subTest(items=items):
+                self.client.call.return_value = {"SumFlux": 1, "DataInfoList": items}
+                with self.assertRaises(TencentError):
+                    fetch_today_downstream(self.client, self.now)
+
+    def test_rejects_invalid_time_and_timezone_types(self):
+        for now, offset in ((True, 0), (-1, 0), (self.now, True),
+                            (self.now, 15 * 3600), (self.now, "UTC+08:00")):
+            with self.subTest(now=now, offset=offset), self.assertRaises(TencentError):
+                fetch_today_downstream(self.client, now, offset)
+        self.client.call.assert_not_called()
 
 
 class PackagePaginationTests(unittest.TestCase):

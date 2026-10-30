@@ -37,6 +37,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(300, cfg["sampling"]["interval_seconds"])
         self.assertEqual(600, cfg["sampling"]["max_data_age_seconds"])
         self.assertEqual(60, cfg["reports"]["interval_minutes"])
+        self.assertEqual(5, cfg["reports"]["delay_minutes"])
+        self.assertIs(False, cfg["reports"]["revision_updates"])
         self.assertEqual(8 * 3600, cfg["_timezone_offset"])
         self.assertEqual(["50", "10"], cfg["alerts"]["remaining_percent"])
         self.assertIsNone(cfg["accounts"][0]["_anchor"])
@@ -61,6 +63,42 @@ class ConfigTests(unittest.TestCase):
         raw["reports"]["interval_minutes"] = 61
         with self.assertRaises(ConfigError):
             validate_config(raw)
+
+    def test_report_delay_accepts_zero_and_configurable_integer_minutes(self):
+        for delay in (0, 5, 10, 1440):
+            with self.subTest(delay=delay):
+                raw = raw_config()
+                raw["reports"]["delay_minutes"] = delay
+                self.assertEqual(delay, validate_config(raw)["reports"]["delay_minutes"])
+        for delay in (-1, 0.5, "NaN", "Infinity", "bad", 1441, True, False, None):
+            with self.subTest(delay=delay):
+                raw = raw_config()
+                raw["reports"]["delay_minutes"] = delay
+                with self.assertRaises(ConfigError):
+                    validate_config(raw)
+
+    def test_report_revision_updates_requires_a_json_boolean(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                raw = raw_config()
+                raw["reports"]["revision_updates"] = value
+                self.assertIs(value, validate_config(raw)["reports"]["revision_updates"])
+        for value in (0, 1, "true", "false", None, [], {}):
+            with self.subTest(value=value):
+                raw = raw_config()
+                raw["reports"]["revision_updates"] = value
+                with self.assertRaises(ConfigError):
+                    validate_config(raw)
+
+    def test_report_delivery_preferences_do_not_change_accounting_anchor(self):
+        raw = raw_config()
+        first = validate_config(raw)
+        self.assertEqual({}, raw["reports"])
+        raw["reports"].update(delay_minutes=10, revision_updates=True)
+        changed = validate_config(raw)
+        self.assertEqual(first["accounts"][0]["_anchor_id"], changed["accounts"][0]["_anchor_id"])
+        self.assertEqual(5, first["reports"]["delay_minutes"])
+        self.assertIs(False, first["reports"]["revision_updates"])
 
     def test_secret_environment_references_resolve_without_mutating_raw(self):
         raw = raw_config()
