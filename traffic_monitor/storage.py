@@ -37,6 +37,21 @@ class StateStore:
                 raise ValueError()
             if any(not isinstance(v, int) for v in state["reports"].values()):
                 raise ValueError()
+            updates = state.get("report_updates")
+            if updates is not None:
+                if (not isinstance(updates, dict) or not isinstance(updates.get("schedule"), str)
+                        or not isinstance(updates.get("scope"), str) or not isinstance(updates.get("windows"), dict)):
+                    raise ValueError()
+                for end, value in updates["windows"].items():
+                    if (not isinstance(end, str) or not end.isdecimal() or not isinstance(value, dict)
+                            or not isinstance(value.get("signature"), str) or type(value.get("complete")) is not bool):
+                        raise ValueError()
+                observation = updates.get("observation", [])
+                if not isinstance(observation, list) or any(
+                        not isinstance(row, list) or len(row) != 3 or not isinstance(row[0], str)
+                        or any(value is not None and type(value) is not int for value in row[1:])
+                        for row in observation):
+                    raise ValueError()
             self.state = state
         except (ValueError, AttributeError):
             raise StateError("状态文件损坏或版本不兼容，请保留文件排查，不会自动覆盖") from None

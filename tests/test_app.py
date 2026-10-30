@@ -1,14 +1,17 @@
 """Offline end-to-end accounting and routing tests, with no cloud requests."""
 
 from datetime import datetime, timezone
+from decimal import Decimal
+import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from traffic_monitor.app import Monitor, slot_for
+from traffic_monitor.app import Monitor, hourly_usage, slot_for
 from traffic_monitor.config import validate_config
-from traffic_monitor.storage import StateStore
+from traffic_monitor.reporting import window_usage
+from traffic_monitor.storage import StateError, StateStore
 from traffic_monitor.tencent import TencentError
 
 
@@ -275,8 +278,8 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(self.monitor.reports(ANCHOR + 3600))  # 09:00, not 09:17.
         self.monitor.queue.drain(ANCHOR + 3600)
         self.assertEqual(1, len(self.sender.route("normal")))
-        self.assertIn("2026-10-30 08:00:00 +0800", self.sender.route("normal")[0])
-        self.assertIn("2026-10-30 09:00:00 +0800", self.sender.route("normal")[0])
+        self.assertIn("2026-10-30 08:00:00", self.sender.route("normal")[0])
+        self.assertIn("2026-10-30 09:00:00", self.sender.route("normal")[0])
         self.restart()
         self.assertFalse(self.monitor.reports(ANCHOR + 3601))
         self.monitor.queue.drain(ANCHOR + 3601)
@@ -295,6 +298,462 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("统计不完整", report)
         self.assertIn("用量截至", report)
         self.assertIn("1/12", report)
+
+    def use_uncalibrated_reporting(self, names=("账号 A",), regions=("China Mainland",)):
+        raw = raw_config(self.path, names=names, calibrated=False)
+        for account in raw["accounts"]:
+            account["regions"] = list(regions)
+        self.config = validate_config(raw)
+        self.monitor = Monitor(self.config, self.store, sender=self.sender, client_factory=FakeClient)
+
+    def report_usage(self, full_until, missing_region=None, revised=None):
+        """Provide explicit zero rows too: absent dimensions must stay unknown."""
+        revised = revised or {}
+
+        def fetch(client, start, end, services, regions):
+            result = []
+            for service in services:
+                for region in regions:
+                    for timestamp in range(start, end, 300):
+                        if timestamp >= full_until and region == missing_region:
+                            continue
+                        if timestamp >= full_until and missing_region is None:
+                            continue
+                        amount = revised.get((timestamp, service, region), 1_000_000)
+                        result.append({"time": timestamp, "service": service,
+                                       "region": region, "bytes": amount})
+            return result
+
+        self.usage.side_effect = fetch
+
+    def test_hourly_usage_filters_half_open_window_alignment_and_scope(self):
+        account = {"services": ["LVB"], "regions": ["China Mainland", "Europe"]}
+        rows = [
+            {"time": ANCHOR - 300, "service": "LVB", "region": "China Mainland", "bytes": 999},
+            {"time": ANCHOR, "service": "LVB", "region": "China Mainland", "bytes": 10},
+            {"time": ANCHOR, "service": "LVB", "region": "Europe", "bytes": 20},
+            {"time": ANCHOR + 300, "service": "LVB", "region": "China Mainland", "bytes": 30},
+            {"time": ANCHOR + 1, "service": "LVB", "region": "China Mainland", "bytes": 999},
+            {"time": ANCHOR, "service": "LEB", "region": "Europe", "bytes": 999},
+            {"time": ANCHOR + 600, "service": "LVB", "region": "China Mainland", "bytes": 999},
+        ]
+        amount, complete = hourly_usage({"buckets": dict(enumerate(rows))}, ANCHOR, ANCHOR + 600, account)
+        self.assertEqual(Decimal("73.8460"), amount)
+        self.assertEqual(1, complete)  # The second timestamp lacks Europe, not zero traffic.
+
+    def test_hourly_report_separates_raw_mb_from_weighted_package_deduction(self):
+        self.use_uncalibrated_reporting(regions=("China Mainland", "Europe"))
+        self.report_usage(ANCHOR + 3600, revised={
+            (timestamp, "LVB", "Europe"): 2_000_000
+            for timestamp in range(ANCHOR, ANCHOR + 3600, 300)
+        })
+        self.sample(ANCHOR + 3600)
+        text = self.monitor.report_text(ANCHOR + 3600, ANCHOR + 3600)
+        self.assertIn("原始播放流量：36.000000 MB（0.036000 GB）", text)
+        self.assertIn("流量包折算扣量", text)
+        self.assertIn("52.615 MB", text)  # 12 * (1 + 2 * 1.6923), in MB.
+        self.assertIn("12/12", text)
+        self.assertIn("完整统计", text)
+
+    def test_healthy_report_follows_compact_notification_template(self):
+        self.sample(ANCHOR + 3600)
+        text = self.monitor.report_text(ANCHOR + 3600, ANCHOR + 3600)
+        self.assertTrue(text.startswith("【腾讯云直播流量整点汇总】\n统计窗口："))
+        self.assertIn("账号：账号 A", text)
+        self.assertIn("官方结算余量：100.000 B（数据滞后，仅供对照）", text)
+        self.assertIn("直播主流量包（ID 321018）使用中", text)
+        self.assertIn("估算剩余：100.000 B（100.00%）", text)
+        self.assertIn("一小时内用量：原始播放流量：", text)
+        self.assertIn("用量截至：2026-10-30 09:00:00", text)
+        self.assertTrue(text.endswith("说明：未到达的用量段不计为零；数据可能回补修订。"))
+        self.assertEqual(9, len(text.splitlines()))
+        for removed in ("生成时间", "统计范围", "安全可用", "预留", "预计安全可用时长",
+                        "当前有效可用包总额度", "折算明细", "+0800"):
+            self.assertNotIn(removed, text)
+
+    def test_partial_timestamp_is_in_amount_but_not_complete_count(self):
+        self.use_uncalibrated_reporting(regions=("China Mainland", "Europe"))
+        self.report_usage(ANCHOR + 3300, missing_region="Europe")
+        self.sample(ANCHOR + 3600)
+        text = self.monitor.report_text(ANCHOR + 3600, ANCHOR + 3600)
+        self.assertIn("原始播放流量：23.000000 MB（0.023000 GB）", text)
+        self.assertIn("11/12", text)
+        self.assertIn("暂报", text)
+        self.assertIn("不完整", text)
+
+    def test_incomplete_hour_is_supplemented_once_when_all_data_arrives(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3300)
+        self.sample(ANCHOR + 3600)
+        self.assertTrue(self.monitor.reports(ANCHOR + 3600))
+        self.monitor.queue.drain(ANCHOR + 3600)
+        first = self.sender.route("normal")[-1]
+        self.assertIn("暂报", first)
+        self.assertIn("11/12", first)
+        self.assertIn("11.000000 MB", first)
+
+        self.report_usage(ANCHOR + 3900)
+        self.sample(ANCHOR + 3900)
+        self.assertTrue(self.monitor.reports(ANCHOR + 3900))
+        self.monitor.queue.drain(ANCHOR + 3900)
+        reports = self.sender.route("normal")
+        self.assertEqual(2, len(reports))
+        self.assertIn("补报", reports[-1])
+        self.assertIn("12/12", reports[-1])
+        self.assertIn("12.000000 MB", reports[-1])
+        self.assertIn("2026-10-30 08:00:00", reports[-1])
+        self.assertIn("2026-10-30 09:00:00", reports[-1])
+        self.restart()
+        self.assertFalse(self.monitor.reports(ANCHOR + 3901))
+        self.monitor.queue.drain(ANCHOR + 3901)
+        self.assertEqual(2, len(self.sender.route("normal")))
+
+    def test_partial_updates_wait_for_completion_before_sending_supplement(self):
+        self.use_uncalibrated_reporting(regions=("China Mainland", "Europe"))
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3300, missing_region="Europe")
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.monitor.queue.drain(ANCHOR + 3600)
+        self.report_usage(ANCHOR + 3300, missing_region="Europe", revised={
+            (ANCHOR, "LVB", "China Mainland"): 2_000_000,
+        })
+        self.sample(ANCHOR + 3900)
+        self.assertFalse(self.monitor.reports(ANCHOR + 3900))
+        self.monitor.queue.drain(ANCHOR + 3900)
+        self.assertEqual(1, len(self.sender.route("normal")))
+
+    def test_completed_hour_revisions_are_reported_and_deduplicated(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3600)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.monitor.queue.drain(ANCHOR + 3600)
+        self.report_usage(ANCHOR + 3900, revised={
+            (ANCHOR + 3300, "LVB", "China Mainland"): 2_000_000,
+        })
+        self.sample(ANCHOR + 3900)
+        self.assertTrue(self.monitor.reports(ANCHOR + 3900))
+        self.monitor.queue.drain(ANCHOR + 3900)
+        self.assertEqual(2, len(self.sender.route("normal")))
+        self.assertIn("修订", self.sender.route("normal")[-1])
+        self.assertIn("13.000000 MB", self.sender.route("normal")[-1])
+        self.restart()
+        self.assertFalse(self.monitor.reports(ANCHOR + 3901))
+        self.monitor.queue.drain(ANCHOR + 3901)
+        self.assertEqual(2, len(self.sender.route("normal")))
+
+    def test_completion_waits_for_all_accounts_in_the_report(self):
+        self.use_uncalibrated_reporting(names=("账号 A", "账号 B"))
+        self.monitor.reports(ANCHOR + 1800)
+
+        def initial_usage(client, start, end, services, regions):
+            cutoff = ANCHOR + (3300 if "账号 B" in client.secret_id else 3600)
+            return buckets(start, min(end, cutoff), {
+                timestamp: 1_000_000 for timestamp in range(start, min(end, cutoff), 300)
+            })
+
+        self.usage.side_effect = initial_usage
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.monitor.queue.drain(ANCHOR + 3600)
+        self.assertIn("12/12", self.sender.route("normal")[-1])
+        self.assertIn("11/12", self.sender.route("normal")[-1])
+        self.assertFalse(self.monitor.reports(ANCHOR + 3601))
+        self.report_usage(ANCHOR + 3900)
+        self.sample(ANCHOR + 3900)
+        self.assertTrue(self.monitor.reports(ANCHOR + 3900))
+        self.monitor.queue.drain(ANCHOR + 3900)
+        self.assertEqual(2, len(self.sender.route("normal")))
+        self.assertIn("补报", self.sender.route("normal")[-1])
+        self.assertNotIn("11/12", self.sender.route("normal")[-1])
+
+    def test_pending_completion_notification_survives_restart_without_duplicates(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3300)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.monitor.queue.drain(ANCHOR + 3600)
+        self.report_usage(ANCHOR + 3900)
+        self.sample(ANCHOR + 3900)
+        self.assertTrue(self.monitor.reports(ANCHOR + 3900))
+        self.restart()  # The supplement is queued but has not been sent yet.
+        self.assertFalse(self.monitor.reports(ANCHOR + 3901))
+        self.monitor.queue.drain(ANCHOR + 3901)
+        self.assertEqual(2, len(self.sender.route("normal")))
+        self.assertIn("补报", self.sender.route("normal")[-1])
+
+    def test_completion_replaces_unsent_provisional_report_with_latest_data(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3300)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        pending = [item for item in self.store.state["outbox"] if item["route"] == "normal"]
+        self.assertEqual(1, len(pending))
+        self.assertIn("暂报", pending[0]["text"])
+        pending[0]["attempts"] = 3
+        pending[0]["next_attempt"] = ANCHOR + 7200
+
+        self.report_usage(ANCHOR + 3900)
+        self.monitor.sample(ANCHOR + 3900)  # Leave the old report undelivered.
+        self.assertTrue(self.monitor.reports(ANCHOR + 3900))
+        pending = [item for item in self.store.state["outbox"] if item["route"] == "normal"]
+        self.assertEqual(1, len(pending))
+        self.assertIn("补报", pending[0]["text"])
+        self.assertIn("12.000000 MB", pending[0]["text"])
+        self.assertNotIn("暂报", pending[0]["text"])
+        self.assertEqual(0, pending[0]["attempts"])
+        self.monitor.queue.drain(ANCHOR + 3900)
+        self.assertEqual(1, len(self.sender.route("normal")))
+        self.assertIn("补报", self.sender.route("normal")[0])
+
+    def test_queued_revisions_returning_to_same_value_keep_only_latest_text(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3600)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.monitor.queue.drain(ANCHOR + 3600)
+        # A -> B -> A reuses A's content signature. The latest A must replace B.
+        for now, amount, total_mb in ((3900, 2_000_000, "13.000000"),
+                                      (4200, 3_000_000, "14.000000"),
+                                      (4500, 2_000_000, "13.000000")):
+            self.report_usage(ANCHOR + now, revised={
+                (ANCHOR + 3300, "LVB", "China Mainland"): amount,
+            })
+            self.monitor.sample(ANCHOR + now)
+            self.assertTrue(self.monitor.reports(ANCHOR + now))
+            pending = [item for item in self.store.state["outbox"] if item["route"] == "normal"]
+            self.assertEqual(1, len(pending))
+            self.assertIn("修订", pending[0]["text"])
+            self.assertIn("原始播放流量：%s MB" % total_mb, pending[0]["text"])
+        self.restart()
+        self.assertFalse(self.monitor.reports(ANCHOR + 4501))
+        self.monitor.queue.drain(ANCHOR + 4501)
+        self.assertEqual(2, len(self.sender.route("normal")))
+        self.assertIn("原始播放流量：13.000000 MB", self.sender.route("normal")[-1])
+
+    def test_scope_change_discards_queued_reports_but_keeps_business_and_error_messages(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3300)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.monitor.queue.enqueue("normal", "threshold/account/10/test", "business alert", ANCHOR + 3600)
+        self.monitor.queue.incident("offline/unavailable", "error alert", ANCHOR + 3600)
+        retained = {item["id"] for item in self.store.state["outbox"]
+                    if not item["id"].startswith(("normal/report/", "normal/report-update/"))}
+        self.assertEqual(2, len(retained))
+        raw = raw_config(self.path, calibrated=False)
+        raw["accounts"][0]["regions"] = ["China Mainland", "Europe"]
+        self.config = validate_config(raw)
+        self.monitor.reconfigure(self.config)
+        self.assertEqual(retained, {item["id"] for item in self.store.state["outbox"]})
+        self.restart()
+        self.assertEqual(retained, {item["id"] for item in self.store.state["outbox"]})
+        self.monitor.queue.drain(ANCHOR + 3601)
+        self.assertEqual(["business alert"], self.sender.route("normal"))
+        self.assertTrue(any("error alert" in text for text in self.sender.route("error")))
+
+    def test_schedule_change_discards_queued_report_before_next_collection(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3600)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.assertTrue(any(item["route"] == "normal" for item in self.store.state["outbox"]))
+        raw = raw_config(self.path, calibrated=False)
+        raw["reports"]["interval_minutes"] = 30
+        self.config = validate_config(raw)
+        self.monitor.reconfigure(self.config)
+        self.assertFalse(any(item["route"] == "normal" for item in self.store.state["outbox"]))
+
+    def test_unchanged_five_second_scheduler_ticks_do_not_write_state(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3600)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        with patch.object(self.store, "save", wraps=self.store.save) as save:
+            for offset in range(3605, 3660, 5):
+                self.assertFalse(self.monitor.reports(ANCHOR + offset))
+            save.assert_not_called()
+
+    def test_upgrade_can_complete_last_reported_hour_without_resending_provisional(self):
+        self.use_uncalibrated_reporting()
+        self.report_usage(ANCHOR + 3300)
+        self.sample(ANCHOR + 3600)
+        # Simulate a 1.1.0 state: an hourly report was sent, without the new tracker.
+        self.store.state["reports"]["UTC+08:00/60"] = ANCHOR + 3600
+        self.store.save()
+        self.restart()
+        self.assertFalse(self.monitor.reports(ANCHOR + 3601))
+        self.report_usage(ANCHOR + 3900)
+        self.sample(ANCHOR + 3900)
+        self.assertTrue(self.monitor.reports(ANCHOR + 3900))
+        self.monitor.queue.drain(ANCHOR + 3900)
+        self.assertEqual(1, len(self.sender.route("normal")))
+        self.assertIn("补报", self.sender.route("normal")[-1])
+
+    def test_current_hour_new_data_does_not_revise_previous_hour(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3600)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.monitor.queue.drain(ANCHOR + 3600)
+        self.report_usage(ANCHOR + 3900, revised={
+            (ANCHOR + 3600, "LVB", "China Mainland"): 99_000_000,
+        })
+        self.sample(ANCHOR + 3900)
+        self.assertFalse(self.monitor.reports(ANCHOR + 3900))
+        self.monitor.queue.drain(ANCHOR + 3900)
+        self.assertEqual(1, len(self.sender.route("normal")))
+
+    def test_revisions_that_preserve_raw_total_still_update_folded_deduction(self):
+        self.use_uncalibrated_reporting(regions=("China Mainland", "Europe"))
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3600)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.monitor.queue.drain(ANCHOR + 3600)
+        self.report_usage(ANCHOR + 3900, revised={
+            (ANCHOR + 3300, "LVB", "China Mainland"): 0,
+            (ANCHOR + 3300, "LVB", "Europe"): 2_000_000,
+        })
+        self.sample(ANCHOR + 3900)
+        self.assertTrue(self.monitor.reports(ANCHOR + 3900))
+        self.monitor.queue.drain(ANCHOR + 3900)
+        self.assertEqual(2, len(self.sender.route("normal")))
+        self.assertIn("修订", self.sender.route("normal")[-1])
+        self.assertIn("原始播放流量：24.000000 MB", self.sender.route("normal")[-1])
+        self.assertIn("33.000 MB", self.sender.route("normal")[-1])
+
+    def test_explicit_zero_rows_complete_the_hour(self):
+        self.use_uncalibrated_reporting()
+        self.usage.side_effect = lambda client, start, end, services, regions: buckets(start, end)
+        self.sample(ANCHOR + 3600)
+        text = self.monitor.report_text(ANCHOR + 3600, ANCHOR + 3600)
+        self.assertIn("原始播放流量：0.000000 MB（0.000000 GB）", text)
+        self.assertIn("流量包折算扣量：0.000 B", text)
+        self.assertIn("完整统计", text)
+        self.assertIn("12/12", text)
+        self.assertNotIn("暂报", text)
+
+    def test_push_traffic_is_separate_from_raw_playback(self):
+        raw = raw_config(self.path, calibrated=False)
+        raw["accounts"][0]["services"] = ["LVB", "PUSH"]
+        self.config = validate_config(raw)
+        self.monitor = Monitor(self.config, self.store, sender=self.sender, client_factory=FakeClient)
+        self.report_usage(ANCHOR + 3600)
+        self.sample(ANCHOR + 3600)
+        usage = window_usage(self.record()["usage"], ANCHOR, ANCHOR + 3600, self.config["accounts"][0])
+        self.assertEqual(Decimal(12_000_000), usage["raw"])
+        self.assertEqual(Decimal(12_000_000), usage["push"])
+        self.assertEqual(Decimal(24_000_000), usage["folded"])
+        self.assertEqual(12, usage["complete"])
+        text = self.monitor.report_text(ANCHOR + 3600, ANCHOR + 3600)
+        self.assertIn("原始播放流量：12.000000 MB", text)
+        self.assertIn("原始推流流量：12.000000 MB", text)
+
+    def test_continuous_cutoff_stops_at_first_gap_even_with_later_complete_data(self):
+        self.use_uncalibrated_reporting()
+        self.usage.side_effect = lambda client, start, end, services, regions: [
+            row for row in buckets(start, end) if row["time"] != ANCHOR + 600
+        ]
+        self.sample(ANCHOR + 3600)
+        usage = window_usage(self.record()["usage"], ANCHOR, ANCHOR + 3600, self.config["accounts"][0])
+        self.assertEqual(11, usage["complete"])
+        self.assertEqual(0, usage["partial"])
+        self.assertEqual(ANCHOR + 600, usage["cutoff"])
+        text = self.monitor.report_text(ANCHOR + 3600, ANCHOR + 3600)
+        self.assertIn("暂报", text)
+        self.assertIn("用量截至：2026-10-30 08:10:00", text)
+
+    def test_expired_correction_window_does_not_send_historical_revision(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3600)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.monitor.queue.drain(ANCHOR + 3600)
+        raw = raw_config(self.path, calibrated=False)
+        raw["sampling"]["lookback_minutes"] = 5
+        self.config = validate_config(raw)
+        self.monitor.reconfigure(self.config)
+        key = "%s|LVB|China Mainland" % ANCHOR
+        self.record()["usage"]["buckets"][key]["bytes"] = 2_000_000
+        self.report_usage(ANCHOR + 3900)
+        self.sample(ANCHOR + 3901)
+        self.assertFalse(self.monitor.reports(ANCHOR + 3901))
+        self.monitor.queue.drain(ANCHOR + 3901)
+        self.assertEqual(1, len(self.sender.route("normal")))
+
+    def test_corrupt_report_tracker_is_rejected_without_overwriting_state(self):
+        window = {str(ANCHOR + 3600): {"signature": "abc", "complete": True}}
+        malformed = [
+            [],
+            {"schedule": "UTC+08:00/60", "scope": "abc", "windows": []},
+            {"schedule": "UTC+08:00/60", "scope": "abc", "windows": {
+                "bad-time": {"signature": "abc", "complete": True}}},
+            {"schedule": "UTC+08:00/60", "scope": "abc", "windows": {
+                str(ANCHOR): {"signature": 1, "complete": True}}},
+            {"schedule": "UTC+08:00/60", "scope": "abc", "windows": {
+                str(ANCHOR): {"signature": "abc", "complete": 1}}},
+            {"schedule": "UTC+08:00/60", "scope": "abc", "windows": window,
+             "observation": [["account", 1, "not-a-time"]]},
+            {"schedule": "UTC+08:00/60", "scope": "abc", "windows": window,
+             "observation": [["account", True, 1]]},
+        ]
+        for updates in malformed:
+            with self.subTest(updates=updates):
+                state = {"version": 1, "accounts": {}, "outbox": [], "errors": {}, "reports": {},
+                         "report_updates": updates}
+                original = json.dumps(state)
+                self.path.write_text(original, encoding="utf-8")
+                with self.assertRaises(StateError):
+                    StateStore(self.path).load()
+                self.assertEqual(original, self.path.read_text(encoding="utf-8"))
+
+    def test_schedule_change_starts_at_next_boundary_without_old_supplement(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3300)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.monitor.queue.drain(ANCHOR + 3600)
+        changed = raw_config(self.path, calibrated=False)
+        changed["reports"]["interval_minutes"] = 30
+        self.config = validate_config(changed)
+        self.monitor.reconfigure(self.config)
+        self.report_usage(ANCHOR + 3900)
+        self.sample(ANCHOR + 3900)
+        self.assertFalse(self.monitor.reports(ANCHOR + 3900))
+        self.assertTrue(self.monitor.reports(ANCHOR + 5400))
+        self.monitor.queue.drain(ANCHOR + 5400)
+        self.assertEqual(2, len(self.sender.route("normal")))
+        self.assertIn("2026-10-30 09:30:00", self.sender.route("normal")[-1])
+
+    def test_scope_change_does_not_compare_new_scope_with_old_hour(self):
+        self.use_uncalibrated_reporting()
+        self.monitor.reports(ANCHOR + 1800)
+        self.report_usage(ANCHOR + 3300)
+        self.sample(ANCHOR + 3600)
+        self.monitor.reports(ANCHOR + 3600)
+        self.monitor.queue.drain(ANCHOR + 3600)
+        raw = raw_config(self.path, calibrated=False)
+        raw["accounts"][0]["regions"] = ["China Mainland", "Europe"]
+        self.config = validate_config(raw)
+        self.monitor.reconfigure(self.config)
+        self.report_usage(ANCHOR + 3900)
+        self.sample(ANCHOR + 3900)
+        self.assertFalse(self.monitor.reports(ANCHOR + 3900))
+        self.monitor.queue.drain(ANCHOR + 3900)
+        self.assertEqual(1, len(self.sender.route("normal")))
 
     def test_dry_run_previews_without_state_or_messages(self):
         self.store = StateStore(self.path, read_only=True)
