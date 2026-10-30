@@ -5,7 +5,7 @@ umask 027
 
 REPO_URL="${REPO_URL:-https://github.com/userreksai/TencentLiveStreamingTrafficMonitoring.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
-INSTALL_DIR="/opt/tencent-traffic-monitor"
+INSTALL_DIR="/usr/local/tencenttraffic"
 CONFIG_DIR="/etc/tencent-traffic-monitor"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 STATE_DIR="/var/lib/tencent-traffic-monitor"
@@ -34,7 +34,7 @@ usage() {
   --help      查看帮助
 
 路径：
-  代码 /opt/tencent-traffic-monitor
+  代码 /usr/local/tencenttraffic
   配置 /etc/tencent-traffic-monitor/config.json
   状态 /var/lib/tencent-traffic-monitor
 
@@ -197,14 +197,14 @@ show_next_steps() {
 并设置已核对的套餐余额基准。未设置基准时，只能展示“未校准”，不会伪报正常余量。
 
   sudo nano /etc/tencent-traffic-monitor/config.json
-  sudo bash /opt/tencent-traffic-monitor/install.sh --check
-  sudo bash /opt/tencent-traffic-monitor/install.sh --start
+  sudo bash /usr/local/tencenttraffic/install.sh --check
+  sudo bash /usr/local/tencenttraffic/install.sh --start
 
 查看日志：
   sudo journalctl -u tencent-traffic-monitor -f
 
 更新最新代码（保留配置与状态）：
-  sudo bash /opt/tencent-traffic-monitor/install.sh --update
+  sudo bash /usr/local/tencenttraffic/install.sh --update
 NEXT
 }
 

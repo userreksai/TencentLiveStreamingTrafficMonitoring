@@ -1,6 +1,6 @@
 # 腾讯云国际站直播流量监控
 
-版本：**1.0.1**。面向腾讯云 CSS 标准直播／快直播，默认每 **5 分钟**采集一次，每个**北京时间整点小时**发送汇总；计算后的安全可用量低于 **50% / 10%** 时提醒重点关注并购买流量包。正常通知和所有异常通知分别发送到两个 Lark／飞书机器人。
+版本：**1.0.2**。面向腾讯云 CSS 标准直播／快直播，默认每 **5 分钟**采集一次，每个**北京时间整点小时**发送汇总；计算后的安全可用量低于 **50% / 10%** 时提醒重点关注并购买流量包。正常通知和所有异常通知分别发送到两个 Lark／飞书机器人。
 
 ## 能得到什么
 
@@ -44,7 +44,7 @@ sudo bash /tmp/tencent-traffic-install.sh
 
 | 内容 | 路径 |
 | --- | --- |
-| 程序与虚拟环境 | `/opt/tencent-traffic-monitor` |
+| 程序与虚拟环境 | `/usr/local/tencenttraffic` |
 | 配置文件 | `/etc/tencent-traffic-monitor/config.json` |
 | 持久化状态 | `/var/lib/tencent-traffic-monitor/state.json` |
 | systemd 服务 | `tencent-traffic-monitor.service` |
@@ -53,11 +53,13 @@ sudo bash /tmp/tencent-traffic-install.sh
 
 ```bash
 sudo nano /etc/tencent-traffic-monitor/config.json
-sudo bash /opt/tencent-traffic-monitor/install.sh --check
-sudo bash /opt/tencent-traffic-monitor/install.sh --start
+sudo bash /usr/local/tencenttraffic/install.sh --check
+sudo bash /usr/local/tencenttraffic/install.sh --start
 ```
 
 `--start` 会同时设置开机自启。配置目录权限为 `0750`，配置文件为 `root:tencent-traffic-monitor 0640`；服务以独立用户运行，代码只读，状态目录可写。
+
+如果此前使用旧版默认目录部署，请重新下载上面的最新安装脚本并执行 `--install`。脚本会在 `/usr/local/tencenttraffic` 获取代码并新建虚拟环境，复用 `/etc/tencent-traffic-monitor` 的配置和 `/var/lib/tencent-traffic-monitor` 的状态，重新写入 systemd 路径；原来已运行或启用的服务会在检查通过后重启。旧代码目录不会自动移动或删除。
 
 ## 配置说明
 
@@ -170,18 +172,18 @@ sudo bash /opt/tencent-traffic-monitor/install.sh --start
 
 ```bash
 # 拉取最新 main，离线检查与配置校验通过后重启原有服务
-sudo bash /opt/tencent-traffic-monitor/install.sh --update
+sudo bash /usr/local/tencenttraffic/install.sh --update
 
 # 只检查配置（不联网、不发通知）
-sudo bash /opt/tencent-traffic-monitor/install.sh --check
+sudo bash /usr/local/tencenttraffic/install.sh --check
 
 # 查看状态和实时日志
-sudo bash /opt/tencent-traffic-monitor/install.sh --status
-sudo bash /opt/tencent-traffic-monitor/install.sh --logs
+sudo bash /usr/local/tencenttraffic/install.sh --status
+sudo bash /usr/local/tencenttraffic/install.sh --logs
 
 # 重启 / 停止
-sudo bash /opt/tencent-traffic-monitor/install.sh --restart
-sudo bash /opt/tencent-traffic-monitor/install.sh --stop
+sudo bash /usr/local/tencenttraffic/install.sh --restart
+sudo bash /usr/local/tencenttraffic/install.sh --stop
 ```
 
 更新采用 Git 快进合并，拒绝覆盖本地修改、不同仓库、不同分支或未推送提交。配置、凭证和状态在 Git 目录之外，不会被更新覆盖。若测试或配置检查失败，不会重启服务，应处理错误后重试。
@@ -199,7 +201,7 @@ sudo env REPO_URL=https://github.com/userreksai/TencentLiveStreamingTrafficMonit
 进入代码目录，使用虚拟环境。下面 `--dry-run` 不发送消息：
 
 ```bash
-cd /opt/tencent-traffic-monitor
+cd /usr/local/tencenttraffic
 sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /etc/tencent-traffic-monitor/config.json --once --dry-run --report-now
 ```
 
