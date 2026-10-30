@@ -187,13 +187,15 @@ class MonitorTests(unittest.TestCase):
         self.assertFalse(self.record()["quality"])
         self.assertEqual([], self.sender.route("normal"))
 
-    def test_wall_clock_expiry_is_detected_even_if_provider_status_is_still_active(self):
+    def test_known_baseline_expiry_is_automatic_even_if_provider_status_is_still_active(self):
         self.packages.return_value = [package(expires="2026-10-30 08:07:00")]
         self.assertTrue(self.sample(ANCHOR + 300))
-        self.assertFalse(self.sample(ANCHOR + 600))
-        self.assertTrue(self.record()["inventory_changed"])
+        self.assertTrue(self.sample(ANCHOR + 600))
+        self.assertFalse(self.record()["inventory_changed"])
         self.assertEqual([], self.record()["official"]["packages"])
-        self.assertFalse(self.record()["quality"])
+        self.assertTrue(self.record()["quality"])
+        self.assertEqual("0", self.record()["result"]["estimated_remaining_bytes"])
+        self.assertEqual("100", self.record()["result"]["expired_bytes"])
 
     def test_changed_expiry_requires_recalibration(self):
         self.sample(ANCHOR + 300)

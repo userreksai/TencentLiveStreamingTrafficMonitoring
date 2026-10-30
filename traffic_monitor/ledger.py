@@ -7,6 +7,8 @@ or byte calculations use Decimal, never binary floating point.
 
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 
+from .funding import replay_funding
+
 
 BUCKET_SECONDS = 300
 REGIONS = (
@@ -251,7 +253,7 @@ def calculate(ledger, now, safety_seconds=900, safety_factor="1.1", ratios=None,
               if burn_rate else (0 if remaining == 0 else None))
     safe_runway = (int((Decimal(safe_remaining) / burn_rate).to_integral_value(rounding=ROUND_FLOOR))
                    if burn_rate else (0 if safe_remaining == 0 else None))
-    return {
+    result = {
         "consumed_bytes": str(used),
         "estimated_remaining_bytes": str(remaining),
         "safe_remaining_bytes": str(safe_remaining),
@@ -275,3 +277,34 @@ def calculate(ledger, now, safety_seconds=900, safety_factor="1.1", ratios=None,
         "bucket_count": len(ledger["buckets"]),
         "anchor_time": anchor,
     }
+    funding = ledger.get("funding")
+    if funding is not None:
+        replay = replay_funding(anchor, balance, total,
+                                [{"time": timestamp, "bytes": _text(amount)}
+                                 for timestamp, amount in interval_totals.items()],
+                                funding["lots"], now, baseline_lots=funding.get("baseline_lots"))
+        remaining = int(replay["remaining_bytes"])
+        capacity = int(replay["active_capacity_bytes"])
+        uncovered = int(replay["uncovered_usage_bytes"])
+        # Public package metadata cannot prove that a later purchase paid an
+        # earlier uncovered interval. Hold that amount conservatively instead
+        # of silently marking either quota or historical charges as settled.
+        uncovered_hold = min(remaining, uncovered)
+        safe_remaining = max(0, remaining - reserve - uncovered_hold)
+        denominator = capacity or 1
+        result.update(
+            estimated_remaining_bytes=str(remaining), safe_remaining_bytes=str(safe_remaining),
+            remaining_percent=_text(Decimal(remaining) * 100 / denominator),
+            safe_percent=_text(Decimal(safe_remaining) * 100 / denominator),
+            reserve_bytes=str(reserve + uncovered_hold), timing_reserve_bytes=str(reserve),
+            uncovered_reserve_bytes=str(uncovered_hold), overrun_bytes=str(uncovered),
+            active_capacity_bytes=str(capacity), gross_capacity_bytes=replay["gross_capacity_bytes"],
+            expired_bytes=replay["expired_bytes"], retired_bytes=replay["retired_bytes"],
+            baseline_remaining_bytes=replay["baseline_remaining_bytes"],
+            funding_lots=replay["lots"], opaque_baseline=replay["opaque_baseline"],
+            runway_seconds=(int((Decimal(remaining) / burn_rate).to_integral_value(rounding=ROUND_FLOOR))
+                            if burn_rate else (0 if remaining == 0 else None)),
+            safe_runway_seconds=(int((Decimal(safe_remaining) / burn_rate).to_integral_value(rounding=ROUND_FLOOR))
+                                 if burn_rate else (0 if safe_remaining == 0 else None)),
+        )
+    return result

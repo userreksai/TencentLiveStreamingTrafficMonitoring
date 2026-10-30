@@ -7,6 +7,7 @@ import logging
 from .config import format_time, redact
 from .ledger import DEFAULT_RATIOS, calculate, new_ledger, upsert_buckets
 from .notifications import NotificationQueue
+from .packages import sync_packages
 from .tencent import TencentClient, fetch_billable_buckets, fetch_packages
 
 LOG = logging.getLogger(__name__)
@@ -44,11 +45,16 @@ def package_snapshot(raw, account, now):
             continue
         total = Decimal(str(item["Total"]))
         left = Decimal(str(item["Left"]))
-        if not total.is_finite() or not left.is_finite() or total <= 0 or left < 0 or left > total:
+        if (not total.is_finite() or not left.is_finite() or total <= 0 or left < 0 or left > total
+                or total != total.to_integral_value() or left != left.to_integral_value()):
             raise ValueError("腾讯云返回了无效的套餐额度")
         expires = _expiry(item.get("ExpireTime"))
+        bought = _expiry(item.get("BuyTime"))
         status = int(item["Status"])
-        known[package_id] = {"total": str(total), "expires": expires, "status": status, "left": str(left)}
+        if status not in (0, 1, 2, 3, 4, 5):
+            raise ValueError("腾讯云返回未知的套餐状态，不能确认套餐可用性")
+        known[package_id] = {"total": str(total), "expires": expires, "status": status,
+                             "left": str(left), "bought": bought}
         if status not in (0, 1) or (expires is not None and expires <= now):
             continue
         active.append({"id": package_id,
@@ -113,28 +119,16 @@ class Monitor:
             record = self.record_for(account, now)
             record["last_attempt"] = now
             faults = []
+            unannounced = []
             name = account["name"]
             client = self.client_factory(account["secret_id"], account["secret_key"],
                                          token=account["session_token"], endpoint=account["endpoint"],
                                          timeout=self.config["sampling"]["request_timeout_seconds"])
             try:
                 snapshot = package_snapshot(fetch_packages(client), account, now)
-                previous = record.get("official", {}).get("known", {})
-                if previous:
-                    for package_id, old in previous.items():
-                        if old["status"] in (0, 1) and Decimal(old["left"]) > 0:
-                            current = snapshot["known"].get(package_id)
-                            if (current is None or (old["expires"] is not None and old["expires"] <= now)
-                                    or current["expires"] != old["expires"]):
-                                record["inventory_changed"] = True
-                    for package_id, current in snapshot["known"].items():
-                        old = previous.get(package_id)
-                        if old is None or old["total"] != current["total"]:
-                            record["inventory_changed"] = True
-                        if (old and old["status"] in (0, 1) and Decimal(old["left"]) > 0
-                                and current["status"] in (2, 3, 5)):
-                            record["inventory_changed"] = True
+                unannounced = sync_packages(record, account, snapshot, now)
                 record["official"] = snapshot
+                self.store.save()  # Funding identity is durable before any notification.
                 self.queue.resolve(name + "/packages", now)
             except Exception as exc:
                 faults.append("套餐列表获取失败")
@@ -175,7 +169,9 @@ class Monitor:
                         # do not reset the ledger or deduct a second time to hide it.
                         tolerance = (Decimal(anchor["total_bytes"])
                                      * Decimal(self.config["alerts"]["reconciliation_tolerance_percent"]) / 100)
-                        if Decimal(official["remaining_bytes"]) + tolerance < Decimal(result["estimated_remaining_bytes"]):
+                        comparable = (Decimal(result["estimated_remaining_bytes"])
+                                      - Decimal(result.get("uncovered_reserve_bytes", "0")))
+                        if Decimal(official["remaining_bytes"]) + tolerance < comparable:
                             faults.append("官方结算余量低于本地估算，超过核对容差；请核查统计范围和校准基准")
                     self.queue.resolve(name + "/uncalibrated", now)
                 else:
@@ -197,7 +193,7 @@ class Monitor:
                 self.queue.incident(name + "/collection", "直播用量获取或计算失败：%s" % redact(exc, self.config), now,
                                     fingerprint=getattr(exc, "code", type(exc).__name__))
             if record.get("inventory_changed"):
-                faults.append("套餐发生新增、额度改变、过期或冻结，需要重新校准")
+                faults.extend(record.get("funding", {}).get("issues") or ["套餐历史变更需要核对"])
             if faults:
                 success = False
                 record["quality"] = False
@@ -207,6 +203,35 @@ class Monitor:
                 record["quality"] = True
                 record["issues"] = []
                 self.queue.resolve(name + "/quality", now)
+            self.store.save()
+            for credit in unannounced:
+                title = account["package_names"].get(credit["id"]) or "云直播流量包"
+                text = "\n".join([
+                    "【腾讯云直播新购流量包已识别】", "账号：%s" % name,
+                    "流量包：%s（ID %s）" % (title, credit["id"]),
+                    "新增总额度：%s" % size(credit["capacity"]),
+                    "购买时间：%s" % format_time(credit["buy_time"], self.config["_timezone_offset"]),
+                    "已自动纳入计算，无需为本次购包修改 anchor。",
+                    "本轮计算状态：%s" % ("正常" if record["quality"] else "数据待核对，详见异常通知"),
+                ])
+                self.queue.enqueue("normal", "purchase/%s/%s/%s" % (account["_id"], credit["id"], credit["buy_time"]), text, now)
+                credit["announced"] = True
+            if record.get("result"):
+                active = {lot["id"] for lot in record["result"].get("funding_lots", [])
+                          if not lot["baseline"] and lot["active"]}
+                armed = set(record.get("armed_purchase_ids", []))
+                if active - armed:
+                    prefixes = ("normal/threshold/%s/" % account["_id"], "normal/runway/%s/" % account["_id"])
+                    self.store.state["outbox"] = [item for item in self.store.state["outbox"]
+                                                   if not item["id"].startswith(prefixes)]
+                    for field in ("last_threshold", "last_threshold_at", "last_runway_at"):
+                        record.pop(field, None)
+                    record["armed_purchase_ids"] = sorted(armed | active)
+            if record.get("result") and int(record["result"]["overrun_bytes"]) > 0:
+                self.queue.incident(name + "/uncovered_usage",
+                                    "部分历史用量在发生时没有可用套餐覆盖，不能因后续购包视为已抵扣；已对安全余量保留对应预留，请核查可能的按量费用。", now)
+            else:
+                self.queue.resolve(name + "/uncovered_usage", now)
             self.store.save()
             if record["quality"]:
                 self.business_alerts(account, record, now)
@@ -301,8 +326,11 @@ class Monitor:
             else:
                 lines.append("状态：已校准，用量数据在允许延迟内")
                 lines.append("估算剩余：%s（%.2f%%）" % (size(result["estimated_remaining_bytes"]), Decimal(result["remaining_percent"])))
+                lines.append("当前有效可用包总额度：%s" % size(result.get("active_capacity_bytes", record["ledger"]["total_bytes"])))
                 lines.append("安全可用：%s（%.2f%%）；预留：%s" % (
                     size(result["safe_remaining_bytes"]), Decimal(result["safe_percent"]), size(result["reserve_bytes"])))
+                if int(result.get("overrun_bytes", "0")):
+                    lines.append("历史未覆盖用量：%s（未因购包清除，已计入安全预留）" % size(result["overrun_bytes"]))
                 runway = result["safe_runway_seconds"]
                 lines.append("预计安全可用时长：%s" % ("暂无消耗速率，无法预测" if runway is None else "%s 分钟" % (runway // 60)))
             amount, count = hourly_usage(record["ledger"], start, slot, account)

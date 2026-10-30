@@ -94,13 +94,15 @@ def main(argv=None):
                         except Exception as exc:
                             monitor.queue.incident("config/reload", "配置修改未生效，继续使用上一份有效配置：%s" % redact(exc, config), now)
                     # Reports and retries have their own wall-clock schedule; report failure does not stop collection.
-                    delivered = monitor.queue.drain(now)
-                    monitor.reports(now)
+                    # On a collection tick, discover new funding before retrying
+                    # normal business alerts from an older, low-quota snapshot.
+                    delivered = monitor.queue.drain(now) if now < next_sample else True
                     success = True
                     if now >= next_sample:
                         success = monitor.sample(now)
                         finished = int(time.time())
                         next_sample = (finished // config["sampling"]["interval_seconds"] + 1) * config["sampling"]["interval_seconds"]
+                    monitor.reports(int(time.time()))
                     if args.report_now:
                         monitor.reports(int(time.time()), force=True)
                     delivered = monitor.queue.drain(int(time.time())) and delivered
