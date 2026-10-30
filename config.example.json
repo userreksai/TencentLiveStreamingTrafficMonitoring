@@ -3,7 +3,7 @@
   "sampling": {
     "interval_seconds": 300,
     "lookback_minutes": 120,
-    "max_data_age_seconds": 900,
+    "max_data_age_seconds": 600,
     "max_backfill_days": 31,
     "request_timeout_seconds": 30
   },

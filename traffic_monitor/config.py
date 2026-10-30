@@ -97,7 +97,7 @@ def validate_config(raw, path=None):
     if sampling["interval_seconds"] % 300:
         raise ConfigError("采集周期必须为 300 秒的整数倍（五分钟粒度）")
     for key, default, low, high in (("lookback_minutes", 120, 5, 44640),
-                                   ("max_data_age_seconds", 900, 300, 86400),
+                                   ("max_data_age_seconds", 600, 300, 86400),
                                    ("max_backfill_days", 31, 1, 31),
                                    ("request_timeout_seconds", 30, 1, 120)):
         sampling[key] = integer(sampling.get(key, default), "sampling." + key, low, high)

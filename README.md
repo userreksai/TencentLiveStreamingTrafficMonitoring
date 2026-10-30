@@ -1,6 +1,6 @@
 # 腾讯云国际站直播流量监控
 
-版本：**1.0.0**。面向腾讯云 CSS 标准直播／快直播，默认每 **5 分钟**采集一次，每个**北京时间整点小时**发送汇总；计算后的安全可用量低于 **50% / 10%** 时提醒重点关注并购买流量包。正常通知和所有异常通知分别发送到两个 Lark／飞书机器人。
+版本：**1.0.1**。面向腾讯云 CSS 标准直播／快直播，默认每 **5 分钟**采集一次，每个**北京时间整点小时**发送汇总；计算后的安全可用量低于 **50% / 10%** 时提醒重点关注并购买流量包。正常通知和所有异常通知分别发送到两个 Lark／飞书机器人。
 
 ## 能得到什么
 
@@ -70,7 +70,7 @@ sudo bash /opt/tencent-traffic-monitor/install.sh --start
   "sampling": {
     "interval_seconds": 300,
     "lookback_minutes": 120,
-    "max_data_age_seconds": 900,
+    "max_data_age_seconds": 600,
     "max_backfill_days": 31,
     "request_timeout_seconds": 30
   },
@@ -83,7 +83,7 @@ sudo bash /opt/tencent-traffic-monitor/install.sh --start
 
 - `interval_seconds=300`：每五分钟采集；改为 `600` 即十分钟。应使用 300 秒的整数倍。
 - `lookback_minutes`：每次重新拉取近期窗口，回补窗口内的迟到／修订数据，按时间段去重。超出窗口的历史修订需提高回查范围或重新核对基准。
-- `max_data_age_seconds`：允许的最新数据年龄，超过后发送异常提醒，不能解释为零消耗。
+- `max_data_age_seconds=600`：最新用量数据落后超过十分钟时发送异常提醒，不能解释为零消耗。每次采集时检查，不构成腾讯云数据时延保证。
 - `max_backfill_days`：首次或变更基准时允许回溯的天数上限。
 - `interval_minutes=60`：北京时间每个整点汇总，按时钟对齐；不是“进程启动后累计一小时”。
 - `timezone` 可改为 `UTC+07:00` 等固定时差。汇总周期至少五分钟、为五分钟的整数倍，且应能整除一天的 1440 分钟。

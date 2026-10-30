@@ -35,6 +35,7 @@ class ConfigTests(unittest.TestCase):
     def test_defaults_are_five_minutes_hourly_and_beijing_clock(self):
         cfg = validate_config(raw_config())
         self.assertEqual(300, cfg["sampling"]["interval_seconds"])
+        self.assertEqual(600, cfg["sampling"]["max_data_age_seconds"])
         self.assertEqual(60, cfg["reports"]["interval_minutes"])
         self.assertEqual(8 * 3600, cfg["_timezone_offset"])
         self.assertEqual(["50", "10"], cfg["alerts"]["remaining_percent"])
