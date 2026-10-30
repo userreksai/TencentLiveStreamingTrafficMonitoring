@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+traffic_monitor_state.json*
+*.log
+.env
+.venv/
+config.json
+config.local.json
+*.local.json
+state.json*
+*.state.json*
+*.pem
+*.key
+coverage/
+.publish*
