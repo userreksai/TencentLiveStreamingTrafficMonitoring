@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "sampling": {
+    "interval_seconds": 300,
+    "lookback_minutes": 120,
+    "max_data_age_seconds": 900,
+    "max_backfill_days": 31,
+    "request_timeout_seconds": 30
+  },
+  "reports": {
+    "timezone": "UTC+08:00",
+    "interval_minutes": 60
+  },
+  "alerts": {
+    "remaining_percent": [50, 10],
+    "repeat_seconds": 3600,
+    "error_repeat_seconds": 1800,
+    "safety_seconds": 900,
+    "safety_factor": "1.10",
+    "reconciliation_tolerance_percent": "0.1",
+    "runway_minutes": 60
+  },
+  "lark": {
+    "normal_webhook": "",
+    "error_webhook": "",
+    "normal_sign_secret": "",
+    "error_sign_secret": ""
+  },
+  "storage": {
+    "state_file": "/var/lib/tencent-traffic-monitor/state.json"
+  },
+  "accounts": [
+    {
+      "name": "直播主账号",
+      "secret_id": "",
+      "secret_key": "",
+      "session_token": "",
+      "endpoint": "live.intl.tencentcloudapi.com",
+      "services": ["LVB", "LEB"],
+      "regions": ["China Mainland", "Asia Pacific I", "Asia Pacific II", "Asia Pacific III", "Europe", "North America", "South America", "Middle East", "Africa"],
+      "anchor": {
+        "revision": "initial",
+        "usage_start": "",
+        "remaining_tb": null,
+        "total_tb": null
+      },
+      "package_names": {}
+    }
+  ]
+}
