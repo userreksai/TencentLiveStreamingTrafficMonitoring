@@ -102,17 +102,22 @@ class DailyDataTests(unittest.TestCase):
                 self.report()
 
     def test_all_package_statuses_including_exhausted_are_displayed(self):
-        self.packages.return_value = [package(str(status), status=status) for status in range(6)]
-        text = self.report()
-        for state in ("未使用", "使用中", "已过期", "已冻结", "已耗尽", "已退款"):
-            self.assertIn(state, text)
-        self.assertIn("已使用：200.00 TB，总量：200.00 TB", text)
-        self.assertIn("2026-10-22 05:31:15", text)
+        for status, state in enumerate(("未使用", "使用中", "已过期", "已冻结", "已耗尽", "已退款")):
+            with self.subTest(status=status):
+                self.packages.return_value = [package(str(status), status=status)]
+                text = self.report()
+                self.assertIn(state, text)
+                self.assertIn("2026-10-22 05:31:15", text)
+                if status == 4:
+                    self.assertIn("已使用：200.00 TB，总量：200.00 TB", text)
 
     def test_newest_package_first_and_purchase_time_converted_to_beijing(self):
-        self.packages.return_value = [package(), package("new", "2026-10-26T05:31:23+08:00", 1)]
+        dates = ["2026-10-10 05:31:15", "2026-10-18 05:31:22", "2026-10-21 05:31:22",
+                 "2026-10-22 05:31:15", "2026-10-26 05:31:23", "2026-10-27 11:59:49"]
+        self.packages.return_value = [package(str(index), bought) for index, bought in enumerate(dates)]
         text = self.report()
-        self.assertLess(text.index("2026-10-26 05:31:23"), text.index("2026-10-22 05:31:15"))
+        displayed = [line.split(" | ")[1] for line in text.splitlines() if line.startswith("| 已使用：")]
+        self.assertEqual(list(reversed(dates[1:])), displayed)
         self.packages.return_value = [package("new", "2026-10-25T21:31:23Z")]
         self.assertIn("2026-10-26 05:31:23", self.report())
 

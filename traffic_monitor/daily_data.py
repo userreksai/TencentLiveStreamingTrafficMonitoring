@@ -98,7 +98,7 @@ def _tb(amount):
 
 
 def fetch_daily_report(client, now):
-    """Fetch seven complete Beijing days and all official traffic package rows.
+    """Fetch seven complete Beijing days and display the five newest packages.
 
     Daily Flux is MB, package Used/Total are bytes. Neither source is derived
     from local sampling, hourly reports, package multipliers or accounting.
@@ -112,7 +112,7 @@ def fetch_daily_report(client, now):
     lines.extend(["", "📦 流量包使用情况"])
     if packages:
         lines.extend(["| 使用情况 | 购买时间（北京时间） | 状态 |", "| --- | --- | --- |"])
-        for bought, _identifier, used, total, status in packages:
+        for bought, _identifier, used, total, status in packages[:5]:
             lines.append("| 已使用：%s，总量：%s | %s | %s |" % (
                 _tb(used), _tb(total), bought.strftime("%Y-%m-%d %H:%M:%S"), PACKAGE_STATES[status]))
     else:
