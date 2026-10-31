@@ -48,7 +48,7 @@ class DailyReporterTests(unittest.TestCase):
         self.assertFalse(self.reporter.store.path.exists())
         self.assertTrue(self.reporter.tick(NOW))
         self.fetch.assert_called_once()
-        self.assertIn("2026-10-31 10:05:00", self.sender.send.call_args.args[1])
+        self.assertIn("获取时间：2026-10-31 10:05:00（北京时间）", self.sender.send.call_args.args[1])
 
     def test_success_is_once_per_day_even_after_restart_and_force(self):
         self.assertTrue(self.reporter.tick(NOW))

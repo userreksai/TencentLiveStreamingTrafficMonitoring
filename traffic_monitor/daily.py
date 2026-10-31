@@ -1,17 +1,18 @@
 """Independent Beijing-clock daily reporting with its own state and worker."""
 
 from copy import deepcopy
+from datetime import datetime
 import hashlib
 import json
 import logging
 import threading
 import time
 
-from .config import format_time, redact
+from .config import redact
 from .daily_data import fetch_daily_report
 from .notifications import NotificationQueue
 from .storage import StateStore
-from .tencent import TencentClient
+from .tencent import BEIJING, TencentClient
 
 LOG = logging.getLogger(__name__)
 BEIJING_OFFSET = 8 * 3600
@@ -171,7 +172,7 @@ class DailyReporter:
             if not self._current():
                 return True
             text = "【腾讯云直播每日流量包统计】\n账号：%s\n获取时间：%s（北京时间）\n\n%s" % (
-                account["name"], format_time(now, BEIJING_OFFSET), body)
+                account["name"], datetime.fromtimestamp(now, BEIJING).strftime("%Y-%m-%d %H:%M:%S"), body)
             # The daily marker and queue entry are saved together by enqueue.
             # A failed delivery retries the same snapshot without querying again.
             reports[key] = midnight
