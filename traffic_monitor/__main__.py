@@ -1,6 +1,7 @@
 """CLI entry point and independently aligned collection/report schedules."""
 
 import argparse
+from contextlib import nullcontext
 import json
 import logging
 from pathlib import Path
@@ -10,7 +11,8 @@ import time
 
 from . import __version__
 from .app import Monitor
-from .config import load_config, redact
+from .config import load_config, redact, validate_webhook
+from .daily import DailyReporter, DailyReportService, daily_notification_config
 from .notifications import LarkSender
 from .storage import StateStore
 
@@ -40,7 +42,8 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true", help="采集一次并退出")
     parser.add_argument("--dry-run", action="store_true", help="采集和预览一次，不发消息、不写状态")
     parser.add_argument("--report-now", action="store_true", help="立即生成一份汇总，可与 --once 配合")
-    parser.add_argument("--test-notify", choices=("normal", "error"), help="只向指定通道发送测试消息")
+    parser.add_argument("--daily-report-now", action="store_true", help="独立获取并通知今日日报，可配 --dry-run；不采集小时数据")
+    parser.add_argument("--test-notify", choices=("normal", "error", "daily"), help="只向指定通道发送测试消息")
     args = parser.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -65,14 +68,28 @@ def main(argv=None):
                      config["reports"]["delay_minutes"], "开启" if config["reports"]["revision_updates"] else "关闭")
             if any(a["_anchor"] is None for a in config["accounts"]):
                 LOG.warning("存在未校准账号：运行后可采集并上报异常，但不会声称剩余量正常")
+            LOG.info("独立日报%s：北京时间 %s，使用专用群配置", "开启" if config["daily_report"]["enabled"] else "关闭",
+                     config["daily_report"]["time"])
             return 0
         if args.test_notify:
-            LarkSender(config).send(args.test_notify,
+            notify_config = config
+            route = args.test_notify
+            if route == "daily":
+                validate_webhook(config["daily_report"]["webhook"], "daily_report.webhook")
+                notify_config = daily_notification_config(config)
+                route = "normal"
+            LarkSender(notify_config).send(route,
                                     "【腾讯云直播监控通道测试】\n通道：%s\n这是投递测试，不代表腾讯云数据或计算基准已验证。" % args.test_notify)
             LOG.info("测试通知已发送至 %s 通道", args.test_notify)
             return 0
+        if args.daily_report_now:
+            validate_webhook(config["daily_report"]["webhook"], "daily_report.webhook")
+            reporter = DailyReporter(config, dry_run=args.dry_run)
+            with (nullcontext() if args.dry_run else reporter.store.lock()):
+                reporter.store.load()
+                return 0 if reporter.tick(int(time.time()), force=True) else 1
         store = StateStore(config["storage"]["state_file"], read_only=args.dry_run)
-        with store.lock():
+        with store.lock(), (DailyReportService(config) if not (args.once or args.dry_run) else nullcontext()) as daily_service:
             store.load()
             monitor = Monitor(config, store, dry_run=args.dry_run)
             now = int(time.time())
@@ -87,6 +104,8 @@ def main(argv=None):
                         try:
                             candidate = load_config(args.config)
                             monitor.reconfigure(candidate)
+                            if daily_service is not None:
+                                daily_service.reconfigure(candidate)
                             config = candidate
                             config_stat = modified
                             next_sample = now
@@ -124,7 +143,7 @@ def main(argv=None):
         return 0
     except Exception as exc:
         LOG.error("启动失败：%s", redact(exc, config))
-        if not args.check_config and not args.dry_run:
+        if not args.check_config and not args.dry_run and not args.daily_report_now and args.test_notify != "daily":
             _best_effort_config_error(args.config, exc)
         return 1
 

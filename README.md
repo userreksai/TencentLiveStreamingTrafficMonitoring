@@ -1,6 +1,6 @@
 # 腾讯云国际站直播流量监控
 
-版本：**1.2.0**。面向腾讯云 CSS 标准直播／快直播，默认每 **5 分钟**采集一次，**北京时间整点后 5 分钟**发送上一完整小时的汇总；计算后的安全可用量低于 **50% / 10%** 时提醒重点关注并购买流量包。通知中的流量统一使用 **TB**。正常通知和所有异常通知分别发送到两个 Lark／飞书机器人。
+版本：**1.3.0**。面向腾讯云 CSS 标准直播／快直播，默认每 **5 分钟**采集一次，**北京时间整点后 5 分钟**发送上一完整小时的汇总；计算后的安全可用量低于 **50% / 10%** 时提醒重点关注并购买流量包。通知中的流量统一使用 **TB**。小时监控的正常通知和异常通知分别发送到两个 Lark／飞书机器人；新增的每日报表使用独立配置和群机器人，默认通知时间为 **北京时间 10:05**。
 
 ## 能得到什么
 
@@ -10,9 +10,10 @@
 - 已知额度归属的套餐按到期顺序扣量，到期／退款只失效其剩余部分，已耗尽旧包不再拉低新包的可用百分比。
 - 正常汇总采用精简格式，显示统计窗口、流量包名称／ID／状态、流量包估算剩余、今日下行流量和一小时内流量包用量。
 - 每次从官方接口读取今日累计下行总量，按当前报告时区从今日零点开始查询；该总量不再依赖本地逐段累加，也不重复扣入套餐台账。
+- 可独立开启每日报表：到配置时间才查询官方最近七个完整自然日的流量及全部流量包使用情况，包含已耗尽包，并发送至专用群。
 - 默认整点后等待五分钟，且只有小时数据完整后才发送。默认同一窗口发送一次；后续回补仍修正台账，重复修订通知可按需开启。
 - 余量不足 50%、10% 时向正常通知机器人发送购买资源提醒。
-- 获取数据失败、密钥／权限错误、数据过旧、基准未校准、通知失败等异常走异常机器人；持续异常按配置间隔提醒，恢复后通知。
+- 小时监控的获取数据失败、密钥／权限错误、数据过旧、基准未校准、通知失败等异常走原异常机器人；持续异常按配置间隔提醒，恢复后通知。日报异常使用日报专用群。
 - 采集周期、汇总周期、时区、阈值、机器人地址和账号均在 JSON 配置中修改，无需修改 Python 源码。
 - 使用标准库，无第三方 Python 运行依赖。支持 Linux systemd 常驻部署，配置与状态独立于代码目录，更新代码时保留。
 
@@ -161,6 +162,45 @@ sudo bash /usr/local/tencenttraffic/install.sh --start
 - 若启用关键词限制，请允许“腾讯云”；若启用 IP 白名单，需允许服务器的实际出口 IP。
 - 正常机器人投递失败会尝试通过异常机器人报告。异常机器人也不可用时只可写日志，需结合 `journalctl` 发现。
 
+### 独立每日流量及流量包统计
+
+在配置顶层增加 `daily_report` 对象。下面是默认配置；填写**日报专用群**的机器人地址，并将 `enabled` 改为 `true` 后启用：
+
+```json
+"daily_report": {
+  "enabled": false,
+  "time": "10:05",
+  "webhook": "",
+  "sign_secret": ""
+}
+```
+
+- `time` 为 `HH:MM` 格式，固定使用**北京时间（UTC+08:00）**；默认每天 10:05，不受 `reports.timezone`、小时汇总周期和采集周期影响。
+- `webhook`、`sign_secret` 仅用于日报群。启用机器人签名校验时填写 `sign_secret`，其余情况留空。日报及其获取／投递异常均不发送到原来的正常群或异常群。
+- 旧配置没有 `daily_report` 时保持关闭。新增配置及后续修改支持热加载，原有 `lark` 配置和 `anchor` 无需调整。
+
+日报在配置时间到达后单独请求腾讯云官方接口，内容包括：
+
+| 内容 | 官方数据来源与范围 |
+| --- | --- |
+| 最近七天每日流量 | `DescribeBillBandwidthAndFluxList`，`Granularity=1440`，直接读取 `DataInfoList` 中的每天 `Time`、`Flux`；统计北京时间截至昨天的七个完整自然日，覆盖账号全部播放域名、全部计费地区、LVB 与 LEB，不含 `PUSH` 上行。缺失的日数据不会当作零。 |
+| 流量包使用情况 | `DescribeLivePackageInfo` 的 `Total`、`Used`、`BuyTime`、`Status`；列出全部流量包，包含已耗尽、已过期等历史包，按购买时间倒序显示。表中的购买时间为北京时间。 |
+
+日报流量显示两位小数的十进制 TB。每日下行流量不乘资源包抵扣倍率，也不使用本地小时消耗相加。流量包展示的是**官方已结算用量**，随次日计费账单更新，不能作为实时套餐余额。
+
+每个账号每天生成一份正常日报，独立状态会记录当天进度，保留状态后重启不会重复发送。当日通知时间已过而服务刚恢复时，会补发当天一份；不会补发停机期间多天的旧日报。数据获取失败时每五分钟重试；已成功生成而发送失败时，重试同一份内容，不重新获取和生成。内容较长时可能拆分成多条群消息，仍属于同一份日报。
+
+日报在独立后台线程中获取和投递，使用单独的状态与通知队列，文件名为 `storage.state_file` 后追加 `.daily.json`，例如 `/var/lib/tencent-traffic-monitor/state.json.daily.json`。该文件及相邻锁文件也应保留。日报不会写入小时监控的套餐台账，其请求超时、查询失败或群投递失败不会阻塞小时采集与通知。
+
+可以独立预览日报，不触发小时数据采集，也不发送消息：
+
+```bash
+cd /usr/local/tencenttraffic
+sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /etc/tencent-traffic-monitor/config.json --daily-report-now --dry-run
+```
+
+`--dry-run` 使用只读模式，不取得日报状态锁，因此可以在服务运行时预览。去掉 `--dry-run` 会实际获取数据并向日报群投递，且仍遵守当天去重。后台服务在整个运行期间持有日报状态锁，实际手动投递前需先停止服务，执行后再启动服务。
+
 ### 告警阈值与重复间隔
 
 ```json
@@ -268,6 +308,8 @@ sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /et
 ```bash
 sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /etc/tencent-traffic-monitor/config.json --test-notify normal
 sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /etc/tencent-traffic-monitor/config.json --test-notify error
+# 日报专用群（需配置有效的独立 webhook，无需开启 enabled）
+sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /etc/tencent-traffic-monitor/config.json --test-notify daily
 ```
 
 离线测试与脚本语法检查：
@@ -282,6 +324,8 @@ bash -n install.sh
 ## 官方参考
 
 - [直播计费用量查询：五分钟粒度、业务类型与计费地区](https://www.tencentcloud.com/document/product/267/36098)
+- [直播播放流量查询：天粒度 Granularity=1440](https://cloud.tencent.com/document/product/267/35971)
+- [直播套餐包查询：总量、已用量、购买时间与状态](https://cloud.tencent.com/document/product/267/40942)
 - [直播数据结构：Flux 单位为 MB，Bandwidth 单位为 Mbps](https://www.tencentcloud.com/document/api/267/30767)
 - [播放监控数据：一分钟粒度及约四分钟延迟](https://www.tencentcloud.com/document/product/267/37297)
 - [预付费套餐：海外倍率、抵扣顺序与次日结算](https://www.tencentcloud.com/document/product/267/52220)

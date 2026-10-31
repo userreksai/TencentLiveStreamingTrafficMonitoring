@@ -126,6 +126,22 @@ def validate_config(raw, path=None):
     for route in ("normal", "error"):
         lark[route + "_webhook"] = validate_webhook(lark.get(route + "_webhook", ""), "lark." + route + "_webhook")
         lark[route + "_sign_secret"] = secret_value(lark.get(route + "_sign_secret", ""), "lark 签名密钥")
+    # Daily statistics are opt-in and use a separate destination and Beijing clock.
+    # Missing this section must preserve existing deployments and account scopes.
+    daily = cfg.setdefault("daily_report", {})
+    if not isinstance(daily, dict):
+        raise ConfigError("daily_report 必须为对象")
+    daily.setdefault("enabled", False)
+    if type(daily["enabled"]) is not bool:
+        raise ConfigError("daily_report.enabled 必须为 true 或 false")
+    daily.setdefault("time", "10:05")
+    if (not isinstance(daily["time"], str)
+            or not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", daily["time"])):
+        raise ConfigError("daily_report.time 使用北京时间 HH:MM 格式，例如 10:05")
+    daily["webhook"] = secret_value(daily.get("webhook", ""), "daily_report.webhook")
+    if daily["enabled"] or daily["webhook"]:
+        daily["webhook"] = validate_webhook(daily["webhook"], "daily_report.webhook")
+    daily["sign_secret"] = secret_value(daily.get("sign_secret", ""), "daily_report.sign_secret")
     state_path = cfg["storage"].get("state_file", "state.json")
     if not isinstance(state_path, str) or not state_path:
         raise ConfigError("storage.state_file 必须填写路径")
@@ -202,6 +218,7 @@ def redact(text, config=None):
         for account in config.get("accounts", []):
             secrets.extend(account.get(k, "") for k in ("secret_id", "secret_key", "session_token"))
         secrets.extend(config.get("lark", {}).values())
+        secrets.extend(config.get("daily_report", {}).get(key, "") for key in ("webhook", "sign_secret"))
     for value in sorted((str(s) for s in secrets if s), key=len, reverse=True):
         result = result.replace(value, "[已隐藏]")
     result = re.sub(r"https://open\.(?:larksuite\.com|feishu\.cn)/open-apis/bot/v2/hook/[^\s\"']+", "[Lark 地址已隐藏]", result)

@@ -28,6 +28,12 @@
     "normal_sign_secret": "",
     "error_sign_secret": ""
   },
+  "daily_report": {
+    "enabled": false,
+    "time": "10:05",
+    "webhook": "",
+    "sign_secret": ""
+  },
   "storage": {
     "state_file": "/var/lib/tencent-traffic-monitor/state.json"
   },
