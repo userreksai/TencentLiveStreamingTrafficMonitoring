@@ -15,7 +15,7 @@
   },
   "alerts": {
     "remaining_percent": [50, 10],
-    "repeat_seconds": 3600,
+    "repeat_seconds": 0,
     "error_repeat_seconds": 1800,
     "safety_seconds": 900,
     "safety_factor": "1.10",
@@ -25,8 +25,10 @@
   "lark": {
     "normal_webhook": "",
     "error_webhook": "",
+    "balance_webhook": "",
     "normal_sign_secret": "",
-    "error_sign_secret": ""
+    "error_sign_secret": "",
+    "balance_sign_secret": ""
   },
   "daily_report": {
     "enabled": false,

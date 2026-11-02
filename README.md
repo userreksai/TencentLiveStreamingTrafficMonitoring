@@ -1,6 +1,6 @@
 # 腾讯云国际站直播流量监控
 
-版本：**1.3.1**。面向腾讯云 CSS 标准直播／快直播，默认每 **5 分钟**采集一次，**北京时间整点后 5 分钟**发送上一完整小时的汇总；计算后的安全可用量低于 **50% / 10%** 时提醒重点关注并购买流量包。通知中的流量统一使用 **TB**。小时监控的正常通知和异常通知分别发送到两个 Lark／飞书机器人；新增的每日报表使用独立配置和群机器人，默认通知时间为 **北京时间 10:05**。
+版本：**1.4.0**。面向腾讯云 CSS 标准直播／快直播，默认每 **5 分钟**采集一次，**北京时间整点后 5 分钟**发送上一完整小时的汇总；计算后的安全可用量低于 **50% / 10%** 时，每轮额度各级别最多提醒一次，并发送至余量告警专用群。通知中的流量统一使用 **TB**。小时汇总、余量告警、技术异常和每日报表使用各自的 Lark／飞书机器人配置；每日报表默认通知时间为 **北京时间 10:05**。
 
 ## 能得到什么
 
@@ -12,7 +12,7 @@
 - 每次从官方接口读取今日累计下行总量，按当前报告时区从今日零点开始查询；该总量不再依赖本地逐段累加，也不重复扣入套餐台账。
 - 可独立开启每日报表：到配置时间才查询官方最近七个完整自然日的流量及流量包使用情况，按购买时间倒序展示最新 5 个包，包含已耗尽包，并发送至专用群。
 - 默认整点后等待五分钟，且只有小时数据完整后才发送。默认同一窗口发送一次；后续回补仍修正台账，重复修订通知可按需开启。
-- 余量不足 50%、10% 时向正常通知机器人发送购买资源提醒。
+- 余量不足 50%、10%、估算耗尽及预计可用时长不足时，向余量告警专用机器人发送提醒；同一轮额度内只提示一次，下降至更严重级别时再提示。
 - 小时监控的获取数据失败、密钥／权限错误、数据过旧、基准未校准、通知失败等异常走原异常机器人；持续异常按配置间隔提醒，恢复后通知。日报异常使用日报专用群。
 - 采集周期、汇总周期、时区、阈值、机器人地址和账号均在 JSON 配置中修改，无需修改 Python 源码。
 - 使用标准库，无第三方 Python 运行依赖。支持 Linux systemd 常驻部署，配置与状态独立于代码目录，更新代码时保留。
@@ -145,22 +145,31 @@ sudo bash /usr/local/tencenttraffic/install.sh --start
 
 从旧版更新时，配置中没有 `delay_minutes`、`revision_updates` 也会自动采用 `5`、`false`，无需重新填写密钥、机器人或 `anchor`。需要自定义时间时再向本机 `reports` 对象补充这两个字段即可。
 
-### 两个机器人地址
+### 小时汇总 余量告警和异常机器人地址
 
 ```json
 "lark": {
   "normal_webhook": "",
   "error_webhook": "",
+  "balance_webhook": "",
   "normal_sign_secret": "",
-  "error_sign_secret": ""
+  "error_sign_secret": "",
+  "balance_sign_secret": ""
 }
 ```
 
-- `normal_webhook`：整点小时汇总、计算后余量不足及购买流量包提醒。
-- `error_webhook`：账号密钥／权限异常、API 查询失败、数据延迟、配置及其他运行异常。
-- 两个地址均由你部署时填写。机器人启用签名校验时再填写对应的 `*_sign_secret`。
+| 配置 | 通知用途 |
+| --- | --- |
+| `lark.normal_webhook` | 整点小时汇总、新购流量包识别通知。 |
+| `lark.balance_webhook` | 安全余量百分比不足、估算耗尽、预计可用时长不足提醒。 |
+| `lark.error_webhook` | 账号密钥／权限异常、API 查询失败、数据延迟、配置及通知投递异常。 |
+| `daily_report.webhook` | 独立每日报表及日报获取／投递异常。 |
+
+- 各地址由你部署时填写。机器人启用签名校验时再填写对应的 `*_sign_secret`；余量告警群使用 `balance_sign_secret`，日报签名使用 `daily_report.sign_secret`。
+- 旧配置没有 `balance_webhook` 时仍可启动，小时汇总和已启用的日报继续运行。余量业务告警暂不发送，异常群会提示补充配置；未配置期间不会消耗相应级别的提醒机会。余量告警不会回退到正常群。
+- 在原有 `lark` 对象中补充 `balance_webhook` 和 `balance_sign_secret` 即可，支持热加载，无需调整账号或 `anchor`。
 - 若启用关键词限制，请允许“腾讯云”；若启用 IP 白名单，需允许服务器的实际出口 IP。
-- 正常机器人投递失败会尝试通过异常机器人报告。异常机器人也不可用时只可写日志，需结合 `journalctl` 发现。
+- 正常或余量告警机器人投递失败，会保留消息重试，并通过异常机器人报告。余量告警投递失败不会改投正常群。异常机器人也不可用时只可写日志，需结合 `journalctl` 发现。
 
 ### 独立每日流量及流量包统计
 
@@ -201,21 +210,36 @@ sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /et
 
 `--dry-run` 使用只读模式，不取得日报状态锁，因此可以在服务运行时预览。去掉 `--dry-run` 会实际获取数据并向日报群投递，且仍遵守当天去重。后台服务在整个运行期间持有日报状态锁，实际手动投递前需先停止服务，执行后再启动服务。
 
-### 告警阈值与重复间隔
+### 余量告警阈值和一次性提醒
 
 ```json
 "alerts": {
   "remaining_percent": [50, 10],
-  "repeat_seconds": 3600,
+  "repeat_seconds": 0,
   "error_repeat_seconds": 1800,
   "safety_seconds": 900,
   "safety_factor": "1.10",
-    "reconciliation_tolerance_percent": "0.1",
+  "reconciliation_tolerance_percent": "0.1",
   "runway_minutes": 60
 }
 ```
 
-阈值比较的是**安全可用量占基准总量的比例**，为严格“小于”。低于 50% 提醒提前准备，低于 10% 重点提醒购买流量包。`repeat_seconds` 控制持续低余量的提醒间隔，`error_repeat_seconds` 控制持续异常的提醒间隔；重启后会保留通知记录。
+百分比阈值比较的是计算结果中的**安全可用百分比 `safe_percent`**，为严格“小于”。安全可用量已经扣除了数据延迟及处置等预留，因此触发条件与报告中的估算剩余量可能略有差别。
+
+| 默认条件 | 提醒行为 |
+| --- | --- |
+| 安全可用百分比低于 50% | 本轮额度首次达到时提醒一次；恰好 50% 不触发。 |
+| 安全可用百分比低于 10% | 进入更严重级别时再提醒一次；恰好 10% 不触发。 |
+| 估算剩余额度小于等于零 | 本轮首次估算耗尽时提醒一次。 |
+| 预计安全可用时长低于 `runway_minutes`，默认 60 分钟 | 本轮首次达到时单独提醒一次；这是按近期速率估算的可用时长。 |
+
+例如当前仍可用额度为 200 TB，安全可用量低于 100 TB 时进入 50% 级别，低于 20 TB 时进入 10% 级别。默认没有 40%、30%、20% 这样的中间百分比级别；可通过 `remaining_percent` 调整阈值。
+
+同一轮额度内只升级至更严重的百分比／耗尽级别。如果首次观察时已低于 10%，只发送 10% 提醒，不补发较轻的 50% 提醒。余量因数据回补暂时上升、再次下降，或修改群地址、热加载配置、重启服务，都不会重新触发已经报告的级别。新购可用额度生效或重新校准计算基准后，开始新的提醒周期。预计可用时长不足的提醒也在本轮内最多一次。
+
+`repeat_seconds` 保留为旧配置兼容字段，**不再控制业务余量告警重复发送**；即使旧配置仍为 `3600`，50% 等同一级别也不会每小时重发。`error_repeat_seconds` 仍控制技术异常的持续提醒间隔。一次性规则限制的是告警生成次数；群消息发送失败时，发送队列仍会重试同一条告警。
+
+升级时请保留原状态文件。历史已报告的阈值继续去重，待发送的旧余量业务消息迁入余量专用通道并去重；不会再混入小时汇总的正常群。
 
 `safety_seconds` 和 `safety_factor` 控制风险预留，避免等估算余量降到零才处置。它们是可配置的保守预警参数，**不是官方抵扣倍率**。`runway_minutes` 控制预计可用时长的预警。
 
@@ -284,6 +308,8 @@ sudo bash /usr/local/tencenttraffic/install.sh --stop
 
 更新采用 Git 快进合并，拒绝覆盖本地修改、不同仓库、不同分支或未推送提交。配置、凭证和状态在 Git 目录之外，不会被更新覆盖。若测试或配置检查失败，不会重启服务，应处理错误后重试。
 
+从旧版本更新到 1.4.0 后，安装脚本会保留原配置，**不会自动填入新的余量告警群地址**。请在 `/etc/tencent-traffic-monitor/config.json` 的现有 `lark` 对象中加入 `balance_webhook`、`balance_sign_secret`，填写余量专用群的机器人地址，再执行 `sudo bash /usr/local/tencenttraffic/install.sh --check`；服务会自动重新加载有效配置。
+
 自定义源码仓库或分支：
 
 ```bash
@@ -308,6 +334,8 @@ sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /et
 ```bash
 sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /etc/tencent-traffic-monitor/config.json --test-notify normal
 sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /etc/tencent-traffic-monitor/config.json --test-notify error
+# 余量告警专用群（需先填写 lark.balance_webhook）
+sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /etc/tencent-traffic-monitor/config.json --test-notify balance
 # 日报专用群（需配置有效的独立 webhook，无需开启 enabled）
 sudo -u tencent-traffic-monitor .venv/bin/python -m traffic_monitor --config /etc/tencent-traffic-monitor/config.json --test-notify daily
 ```

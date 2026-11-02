@@ -35,7 +35,8 @@ def raw_config(path, names=("账号 A",), calibrated=True, anchor=ANCHOR):
                    "error_repeat_seconds": 1800, "safety_seconds": 0,
                    "safety_factor": "1", "runway_minutes": 0},
         "lark": {"normal_webhook": "https://open.larksuite.com/open-apis/bot/v2/hook/offline-normal",
-                 "error_webhook": "https://open.larksuite.com/open-apis/bot/v2/hook/offline-error"},
+                 "error_webhook": "https://open.larksuite.com/open-apis/bot/v2/hook/offline-error",
+                 "balance_webhook": "https://open.larksuite.com/open-apis/bot/v2/hook/offline-balance"},
         "storage": {"state_file": str(path)},
         "accounts": [{"name": name, "secret_id": "id-" + name, "secret_key": "secret-" + name,
                       "services": ["LVB"], "regions": ["China Mainland"],
@@ -135,27 +136,28 @@ class MonitorTests(unittest.TestCase):
     def test_strict_fifty_and_ten_percent_thresholds_only_when_crossed(self):
         history = {ANCHOR: 50}
         self.assertTrue(self.sample(ANCHOR + 300, history))  # Exactly 50%.
-        self.assertEqual([], self.sender.route("normal"))
+        self.assertEqual([], self.sender.route("balance"))
         history[ANCHOR + 300] = 1
         self.assertTrue(self.sample(ANCHOR + 600, history))
-        self.assertEqual(1, len(self.sender.route("normal")))
-        self.assertIn("不足 50%", self.sender.route("normal")[-1])
+        self.assertEqual(1, len(self.sender.route("balance")))
+        self.assertIn("不足 50%", self.sender.route("balance")[-1])
         history[ANCHOR + 600] = 39
         self.assertTrue(self.sample(ANCHOR + 900, history))  # Exactly 10%.
-        self.assertEqual(1, len(self.sender.route("normal")))
+        self.assertEqual(1, len(self.sender.route("balance")))
         history[ANCHOR + 900] = 1
         self.assertTrue(self.sample(ANCHOR + 1200, history))
-        self.assertEqual(2, len(self.sender.route("normal")))
-        self.assertIn("不足 10%", self.sender.route("normal")[-1])
-        self.assertIn("购买流量包", self.sender.route("normal")[-1])
+        self.assertEqual(2, len(self.sender.route("balance")))
+        self.assertIn("不足 10%", self.sender.route("balance")[-1])
+        self.assertIn("购买流量包", self.sender.route("balance")[-1])
+        self.assertEqual([], self.sender.route("normal"))
 
     def test_deeper_threshold_deduplication_survives_restart(self):
         amounts = {ANCHOR: 91}
         self.sample(ANCHOR + 300, amounts)
-        self.assertEqual(1, len(self.sender.route("normal")))
+        self.assertEqual(1, len(self.sender.route("balance")))
         self.restart()
         self.sample(ANCHOR + 600, amounts)
-        self.assertEqual(1, len(self.sender.route("normal")))
+        self.assertEqual(1, len(self.sender.route("balance")))
         self.assertEqual("10", self.record()["last_threshold"])
 
     def test_same_scope_revisions_replace_previous_deduction(self):
@@ -552,7 +554,7 @@ class MonitorTests(unittest.TestCase):
 
     def test_low_balance_business_alerts_also_use_tb_units(self):
         self.sample(ANCHOR + 300, {ANCHOR: 91})
-        text = self.sender.route("normal")[-1]
+        text = self.sender.route("balance")[-1]
         self.assertIn("估算剩余：0.000 TB", text)
         self.assertIn("安全可用：0.000 TB", text)
         self.assertNotRegex(text, r"\d(?:\.\d+)? (?:B|KB|MB|GB|PB)\b")

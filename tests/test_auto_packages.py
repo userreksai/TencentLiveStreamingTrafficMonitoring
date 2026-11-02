@@ -287,23 +287,23 @@ class AutoPackageTests(unittest.TestCase):
     def test_automatic_purchase_rearms_threshold_alerts_for_the_new_pool(self):
         self.amounts = {ANCHOR: 35 * MB}
         self.assertTrue(self.sample(300))
-        self.assertTrue(any("不足 10%" in message for message in self.sender.route("normal")))
+        self.assertTrue(any("不足 10%" in message for message in self.sender.route("balance")))
         self.add_new()
         self.assertTrue(self.sample(900))
         self.amounts[ANCHOR + 900] = 60 * MB
         self.assertTrue(self.sample(1200))
-        self.assertTrue(any("不足 50%" in message for message in self.sender.route("normal")))
+        self.assertTrue(any("不足 50%" in message for message in self.sender.route("balance")))
 
     def test_detected_new_funding_cancels_queued_old_low_balance_alert(self):
         self.amounts = {ANCHOR: 35 * MB}
         self.assertTrue(self.monitor.sample(ANCHOR + 300))
-        prefix = "normal/threshold/%s/" % self.account["_id"]
+        prefix = "balance/threshold/%s/" % self.account["_id"]
         self.assertTrue(any(item["id"].startswith(prefix) for item in self.store.state["outbox"]))
         self.add_new()
         self.assertTrue(self.monitor.sample(ANCHOR + 900))
         self.assertFalse(any(item["id"].startswith(prefix) for item in self.store.state["outbox"]))
         self.monitor.queue.drain(ANCHOR + 900)
-        self.assertFalse(any("不足 10%" in message for message in self.sender.route("normal")))
+        self.assertFalse(any("不足 10%" in message for message in self.sender.route("balance")))
         self.assertTrue(any("新购流量包已识别" in message for message in self.sender.route("normal")))
 
     def test_cli_restart_samples_purchase_before_retrying_old_low_quota_message(self):
@@ -311,7 +311,7 @@ class AutoPackageTests(unittest.TestCase):
         self.assertTrue(self.monitor.sample(ANCHOR + 300))
         with patch.object(self.sender, "send", side_effect=RuntimeError("offline normal delivery failure")):
             self.assertFalse(self.monitor.queue.drain(ANCHOR + 300))
-        prefix = "normal/threshold/%s/" % self.account["_id"]
+        prefix = "balance/threshold/%s/" % self.account["_id"]
         self.assertTrue(any(item["id"].startswith(prefix) for item in self.store.state["outbox"]))
         self.add_new()
         raw = raw_config(self.path)
@@ -325,6 +325,7 @@ class AutoPackageTests(unittest.TestCase):
             code = main(["--config", str(config_path), "--once", "--report-now"])
         self.assertEqual(0, code)
         normal = self.sender.route("normal")
+        self.assertFalse(any("不足 10%" in message for message in self.sender.route("balance")))
         self.assertFalse(any("不足 10%" in message for message in normal))
         self.assertTrue(any("新购流量包已识别" in message for message in normal))
         self.assertTrue(any("整点汇总" in message and "流量包估算剩余：0.000 TB（52.50%）" in message for message in normal))

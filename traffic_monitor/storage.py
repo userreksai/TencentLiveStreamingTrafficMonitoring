@@ -27,7 +27,7 @@ class StateStore:
                 raise ValueError()
             for item in state["outbox"]:
                 if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
-                        or item.get("route") not in ("normal", "error") or not isinstance(item.get("text"), str)
+                        or item.get("route") not in ("normal", "error", "balance") or not isinstance(item.get("text"), str)
                         or any(not isinstance(item.get(k), int) or item[k] < 0
                                for k in ("created_at", "next_attempt", "attempts"))):
                     raise ValueError()
