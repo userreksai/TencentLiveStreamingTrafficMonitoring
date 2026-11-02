@@ -43,7 +43,7 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="采集和预览一次，不发消息、不写状态")
     parser.add_argument("--report-now", action="store_true", help="立即生成一份汇总，可与 --once 配合")
     parser.add_argument("--daily-report-now", action="store_true", help="独立获取并通知今日日报，可配 --dry-run；不采集小时数据")
-    parser.add_argument("--test-notify", choices=("normal", "error", "daily"), help="只向指定通道发送测试消息")
+    parser.add_argument("--test-notify", choices=("normal", "error", "balance", "daily"), help="只向指定通道发送测试消息")
     args = parser.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -70,10 +70,14 @@ def main(argv=None):
                 LOG.warning("存在未校准账号：运行后可采集并上报异常，但不会声称剩余量正常")
             LOG.info("独立日报%s：北京时间 %s，使用专用群配置", "开启" if config["daily_report"]["enabled"] else "关闭",
                      config["daily_report"]["time"])
+            LOG.info("余量告警群%s，使用 lark.balance_webhook 独立配置",
+                     "已配置" if config["lark"]["balance_webhook"] else "未配置")
             return 0
         if args.test_notify:
             notify_config = config
             route = args.test_notify
+            if route == "balance":
+                validate_webhook(config["lark"]["balance_webhook"], "lark.balance_webhook")
             if route == "daily":
                 validate_webhook(config["daily_report"]["webhook"], "daily_report.webhook")
                 notify_config = daily_notification_config(config)
@@ -143,7 +147,8 @@ def main(argv=None):
         return 0
     except Exception as exc:
         LOG.error("启动失败：%s", redact(exc, config))
-        if not args.check_config and not args.dry_run and not args.daily_report_now and args.test_notify != "daily":
+        if (not args.check_config and not args.dry_run and not args.daily_report_now
+                and args.test_notify not in ("daily", "balance")):
             _best_effort_config_error(args.config, exc)
         return 1
 

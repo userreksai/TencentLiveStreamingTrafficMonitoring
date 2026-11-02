@@ -1,4 +1,4 @@
-"""Separate normal/error Lark routes with a durable delivery queue."""
+"""Separate normal, balance and error Lark routes with durable delivery."""
 
 import base64
 import hashlib
@@ -30,6 +30,8 @@ class LarkSender:
 
     def send(self, route, text):
         lark = self.config["lark"]
+        if route == "balance" and not lark.get("balance_webhook"):
+            raise NotificationError("尚未配置 lark.balance_webhook，无法发送余量告警")
         payload = {"msg_type": "text", "content": {"text": text}}
         secret = lark.get(route + "_sign_secret", "")
         if secret:
@@ -129,6 +131,12 @@ class NotificationQueue:
             route = item["route"]
             if item["next_attempt"] > now or route in blocked_routes:
                 continue
+            if route == "balance" and not self.config["lark"].get("balance_webhook"):
+                success = False
+                blocked_routes.add(route)
+                self.incident("lark/balance", "余量告警群尚未配置，请填写 lark.balance_webhook；待发送余量告警已保留。",
+                              now, fingerprint="MissingConfiguration")
+                continue
             try:
                 self.sender.send(route, item["text"])
             except Exception as exc:
@@ -137,12 +145,13 @@ class NotificationQueue:
                 item["attempts"] += 1
                 item["next_attempt"] = now + min(300, 15 * 2 ** min(item["attempts"], 5))
                 LOG.error("%s 通知投递失败：%s", route, redact(exc, self.config))
-                if route == "normal":
-                    self.incident("lark/normal", "正常通知通道投递失败：%s" % redact(exc, self.config), now)
+                if route in ("normal", "balance"):
+                    label = "正常通知" if route == "normal" else "余量告警"
+                    self.incident("lark/" + route, "%s通道投递失败：%s" % (label, redact(exc, self.config)), now)
                 self.store.save()
                 continue
             self.store.state["outbox"].remove(item)
             self.store.save()
-            if route == "normal":
-                self.resolve("lark/normal", now)
+            if route in ("normal", "balance"):
+                self.resolve("lark/" + route, now)
         return success

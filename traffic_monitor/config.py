@@ -116,7 +116,7 @@ def validate_config(raw, path=None):
     if not isinstance(levels, list) or not levels:
         raise ConfigError("alerts.remaining_percent 必须为非空数组")
     alerts["remaining_percent"] = sorted({str(number(v, "告警百分比", 0, 100)) for v in levels}, key=Decimal, reverse=True)
-    for key, default, low in (("repeat_seconds", 3600, 0), ("error_repeat_seconds", 1800, 60),
+    for key, default, low in (("repeat_seconds", 0, 0), ("error_repeat_seconds", 1800, 60),
                                ("safety_seconds", 900, 0), ("runway_minutes", 60, 0)):
         alerts[key] = integer(alerts.get(key, default), "alerts." + key, low, 604800)
     alerts["safety_factor"] = str(number(alerts.get("safety_factor", "1.10"), "alerts.safety_factor", 1, 10))
@@ -126,6 +126,12 @@ def validate_config(raw, path=None):
     for route in ("normal", "error"):
         lark[route + "_webhook"] = validate_webhook(lark.get(route + "_webhook", ""), "lark." + route + "_webhook")
         lark[route + "_sign_secret"] = secret_value(lark.get(route + "_sign_secret", ""), "lark 签名密钥")
+    # Keep older deployments valid while requiring an explicit destination
+    # before any low-balance alert can be delivered.
+    lark["balance_webhook"] = secret_value(lark.get("balance_webhook", ""), "lark.balance_webhook")
+    if lark["balance_webhook"]:
+        lark["balance_webhook"] = validate_webhook(lark["balance_webhook"], "lark.balance_webhook")
+    lark["balance_sign_secret"] = secret_value(lark.get("balance_sign_secret", ""), "lark.balance_sign_secret")
     # Daily statistics are opt-in and use a separate destination and Beijing clock.
     # Missing this section must preserve existing deployments and account scopes.
     daily = cfg.setdefault("daily_report", {})

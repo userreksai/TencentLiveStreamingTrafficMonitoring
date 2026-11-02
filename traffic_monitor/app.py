@@ -1,7 +1,7 @@
 """Collection, calibrated accounting, business alerts and clock-aligned reports."""
 
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import logging
@@ -76,6 +76,14 @@ def hourly_usage(ledger, start, end, account):
     return usage["folded"], usage["complete"]
 
 
+def _more_severe(tag, previous):
+    if previous is None:
+        return True
+    if tag == "exhausted":
+        return previous != tag
+    return previous != "exhausted" and Decimal(tag) < Decimal(previous)
+
+
 class Monitor:
     def __init__(self, config, store, sender=None, client_factory=None, dry_run=False):
         self.config = config
@@ -84,6 +92,92 @@ class Monitor:
         self.client_factory = client_factory or TencentClient
         self.dry_run = dry_run
         self.collected = set()
+        self.migrate_balance_alerts()
+
+    def migrate_balance_alerts(self):
+        """Move pending legacy business alerts off the hourly route once.
+
+        Keep all parts of the most severe pending threshold and the latest
+        runway reminder for each account. Persisted threshold latches survive.
+        """
+        original = self.store.state["outbox"]
+        migrated = []
+        chosen = {}
+        identities = {}
+        obsolete = set()
+        for source in original:
+            item = source
+            if item["id"].startswith(("normal/threshold/", "normal/runway/")):
+                item = dict(item, route="balance", id="balance/" + item["id"].split("/", 1)[1])
+            migrated.append(item)
+            parts = item["id"].split("/")
+            if item["route"] != "balance" or len(parts) < 5:
+                continue
+            kind = parts[1]
+            if kind not in ("threshold", "runway"):
+                continue
+            logical = item["id"].rsplit("/", 1)[0]
+            if kind == "threshold":
+                if len(parts) != 6:
+                    continue
+                try:
+                    level = Decimal("-Infinity") if parts[3] == "exhausted" else Decimal(parts[3])
+                    if parts[3] != "exhausted" and not level.is_finite():
+                        continue
+                except InvalidOperation:
+                    continue
+                previous = self.store.state["accounts"].get(parts[2], {}).get("last_threshold")
+                if previous is not None and _more_severe(previous, parts[3]):
+                    obsolete.add(item["id"])
+                    continue
+            else:
+                if len(parts) != 5:
+                    continue
+                level = Decimal(0)
+            group = (kind, parts[2])
+            rank = (level, -item["created_at"], logical)
+            identities[item["id"]] = (group, logical)
+            if group not in chosen or rank < chosen[group][0]:
+                chosen[group] = (rank, logical)
+        retained = []
+        seen = set()
+        for item in migrated:
+            if item["id"] in obsolete:
+                continue
+            identity = identities.get(item["id"])
+            if identity and identity[1] != chosen[identity[0]][1]:
+                continue
+            if item["id"] not in seen:
+                retained.append(item)
+                seen.add(item["id"])
+        if retained != original:
+            self.store.state["outbox"] = retained
+            self.store.save()
+        updated = False
+        for (kind, key), (rank, logical) in chosen.items():
+            record = self.store.state["accounts"].get(key)
+            if record is None:
+                continue
+            if kind == "runway":
+                if record.get("last_runway_at") is None:
+                    record["last_runway_at"] = -rank[1]
+                    updated = True
+                continue
+            tag = logical.split("/")[3]
+            previous = record.get("last_threshold")
+            # Legacy periodic repeats could overwrite a deeper latch after a
+            # data revision. An undelivered deeper alert still covers that level.
+            if _more_severe(tag, previous):
+                record.update(last_threshold=tag, last_threshold_at=-rank[1])
+                updated = True
+        if updated:
+            self.store.save()
+
+    def discard_balance_alerts(self, key, kinds=("threshold", "runway")):
+        prefixes = tuple("%s/%s/%s/" % (route, kind, key)
+                         for route in ("normal", "balance") for kind in kinds)
+        self.store.state["outbox"] = [item for item in self.store.state["outbox"]
+                                      if not item["id"].startswith(prefixes)]
 
     def reconfigure(self, config):
         if config["storage"]["state_file"] != self.config["storage"]["state_file"]:
@@ -114,6 +208,7 @@ class Monitor:
                 anchor = account["_anchor"]
                 record["ledger"] = new_ledger(anchor["time"], anchor["remaining_bytes"], anchor["total_bytes"])
             if previous:
+                self.discard_balance_alerts(account["_id"])
                 self.queue.incident(account["name"] + "/calibration", "计算基准或统计范围已更改，已按新配置重新建立台账。", now)
         return record
 
@@ -243,9 +338,7 @@ class Monitor:
                           if not lot["baseline"] and lot["active"]}
                 armed = set(record.get("armed_purchase_ids", []))
                 if active - armed:
-                    prefixes = ("normal/threshold/%s/" % account["_id"], "normal/runway/%s/" % account["_id"])
-                    self.store.state["outbox"] = [item for item in self.store.state["outbox"]
-                                                   if not item["id"].startswith(prefixes)]
+                    self.discard_balance_alerts(account["_id"])
                     for field in ("last_threshold", "last_threshold_at", "last_runway_at"):
                         record.pop(field, None)
                     record["armed_purchase_ids"] = sorted(armed | active)
@@ -278,14 +371,19 @@ class Monitor:
         levels = [Decimal(level) for level in self.config["alerts"]["remaining_percent"] if percent < Decimal(level)]
         tag = "exhausted" if Decimal(result["estimated_remaining_bytes"]) <= 0 else (str(min(levels)) if levels else None)
         previous = record.get("last_threshold")
-        last = record.get("last_threshold_at", 0)
-        repeat = self.config["alerts"]["repeat_seconds"]
+        runway = result["safe_runway_seconds"]
+        limit = self.config["alerts"]["runway_minutes"] * 60
+        runway_low = bool(limit and runway is not None and runway < limit)
+        if not self.config["lark"].get("balance_webhook"):
+            if tag is not None or runway_low:
+                self.queue.incident("lark/balance", "余量告警群未配置：请填写 lark.balance_webhook。余量提醒暂不发送，不会改投小时通知群。",
+                                    now, fingerprint="MissingConfiguration")
+            return
+        incident = self.store.state["errors"].get("lark/balance", {})
+        if incident.get("fingerprint") == "MissingConfiguration":
+            self.queue.resolve("lark/balance", now)
         if tag is not None:
-            more_severe = previous is None or (tag == "exhausted" and previous != tag)
-            if tag != "exhausted" and previous not in (None, "exhausted"):
-                more_severe = Decimal(tag) < Decimal(previous)
-            due = repeat > 0 and now - last >= repeat
-            if more_severe or due:
+            if _more_severe(tag, previous):
                 text = "\n".join([
                     "【腾讯云直播流量余量告警】", "账号：%s" % account["name"],
                     "级别：%s" % ("估算已耗尽，请立即核查" if tag == "exhausted" else "安全剩余量不足 %s%%" % tag),
@@ -296,16 +394,15 @@ class Monitor:
                     "请重点关注，并及时购买流量包进行抵扣。已经发生的用量能否追溯抵扣，以腾讯云购包与结算规则为准。",
                     "以上为按计费用量折算的估算值，非官方实时套餐余额。",
                 ])
-                self.queue.enqueue("normal", "threshold/%s/%s/%s" % (account["_id"], tag, now), text, now)
+                # A queued older level is superseded by the current severity.
+                self.discard_balance_alerts(account["_id"], kinds=("threshold",))
                 record.update(last_threshold=tag, last_threshold_at=now)
-        runway = result["safe_runway_seconds"]
-        limit = self.config["alerts"]["runway_minutes"] * 60
-        if (limit and runway is not None and runway < limit
-                and (record.get("last_runway_at") is None or (repeat and now - record["last_runway_at"] >= repeat))):
-            self.queue.enqueue("normal", "runway/%s/%s" % (account["_id"], now),
+                self.queue.enqueue("balance", "threshold/%s/%s/%s" % (account["_id"], tag, now), text, now)
+        if runway_low and record.get("last_runway_at") is None:
+            record["last_runway_at"] = now
+            self.queue.enqueue("balance", "runway/%s/%s" % (account["_id"], now),
                                "【腾讯云直播流量即将不足】\n账号：%s\n按近期较高消耗速率，安全可用量预计支撑约 %s 分钟。\n请及时核查并购买流量包。此时长为预测，不保证后续流量不突增。" % (
                                    account["name"], runway // 60), now)
-            record["last_runway_at"] = now
         self.store.save()
 
     def window_status(self, slot):
